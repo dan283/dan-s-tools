@@ -12,6 +12,7 @@ bl_info = {
 
 import bpy
 
+
 def apply_modifiers(obj):
     ctx = bpy.context.copy()
     ctx['object'] = obj
@@ -25,6 +26,35 @@ def apply_modifiers(obj):
 
     for m in obj.modifiers:
         obj.modifiers.remove(m)
+
+
+class DecimationTools():
+    def __init__(self):
+        pass
+
+    def select_objects_by_poly_count(self, context):
+        start_count = context.scene.start_count
+        bpy.ops.object.select_all(action='DESELECT')  # deselect all objects
+        for obj in bpy.data.objects:
+            if len(obj.data.polygons) > start_count:
+                obj.select_set(True)
+
+    def decimate_selected(self, context):
+        target_count = context.scene.target_count
+        selected_objects = bpy.context.selected_objects
+        for obj in selected_objects:
+            decimate_mod = obj.modifiers.new(name="Decimate", type='DECIMATE')
+            decimate_mod.ratio = target_count
+            bpy.ops.object.modifier_apply(modifier="Decimate")
+
+    def decimate_selected_relative(self, context):
+        decimate_value = context.scene.decimate_value
+        selected_objects = bpy.context.selected_objects
+        for obj in selected_objects:
+            decimate_mod = obj.modifiers.new(name="Decimate", type='DECIMATE')
+            decimate_mod.ratio = obj.target_count/obj.start_count
+            bpy.ops.object.modifier_apply(modifier="Decimate")
+
 
 class MESH_OT_delallshapekeys(bpy.types.Operator):
     bl_idname = 'delall.shapekeys'
@@ -51,6 +81,60 @@ class MESH_OT_delallshapekeys(bpy.types.Operator):
                     obj.shape_key_remove(shape_key)
 
         return {'FINISHED'}
+
+
+class MESH_OT_SelectByPolycount(bpy.types.Operator):
+    bl_idname = 'select.polycount'
+    bl_label = 'Select by polycount'
+
+
+    def execute(self, context):
+        start_count = context.scene.start_count
+        bpy.ops.object.select_all(action='DESELECT')  # deselect all objects
+        for obj in bpy.data.objects:
+            if len(obj.data.polygons) > start_count:
+                obj.select_set(True)
+
+        return {'FINISHED'}
+
+
+class MESH_OT_DecimateSelected(bpy.types.Operator):
+    bl_idname = 'decimate.selected'
+    bl_label = 'decimate selected'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def __init__(self):
+        self.decimation_tools = DecimationTools()
+
+    def execute(self, context):
+
+        target_count = context.scene.target_count
+        selected_objects = bpy.context.selected_objects
+        ratio = 0
+        for object in selected_objects:
+            ratio = len(object.data.polygons)
+            decimate_mod = object.modifiers.new(name="Decimate", type='DECIMATE')
+            decimate_mod.ratio = target_count / ratio
+            bpy.ops.object.modifier_apply(modifier="Decimate")
+
+        return {'FINISHED'}
+
+
+class MESH_OT_DecimateSelectedRelative(bpy.types.Operator):
+    bl_idname = 'decimate.relative'
+    bl_label = 'decimate relative'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        decimate_value = context.scene.decimate_value
+        selected_objects = bpy.context.selected_objects
+        for obj in selected_objects:
+            decimate_mod = obj.modifiers.new(name="Decimate", type='DECIMATE')
+            decimate_mod.ratio = decimate_value
+            bpy.ops.object.modifier_apply(modifier="Decimate")
+
+        return {'FINISHED'}
+
 
 class MESH_OT_applyallmodifiers(bpy.types.Operator):
     bl_idname = 'applyall.modifiers'
@@ -312,6 +396,7 @@ class VIEW3D_PT_dansToolsB(bpy.types.Panel):
         row.operator('anim.shapekeys', icon='OUTLINER_OB_META')
         row.operator('anim.delete', icon='CANCEL')
 
+
 class VIEW3D_PT_dansToolsD(bpy.types.Panel):
     bl_label = "Chibis"
     bl_category = "Dan's Tools"
@@ -355,8 +440,42 @@ class VIEW3D_PT_dansToolsC(bpy.types.Panel):
         col.prop(scene, "frame_end")
 
 
+class VIEW3D_PT_dansToolsE(bpy.types.Panel):
+    bl_label = "Decimation Tools"
+    bl_category = "Dan's Tools"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        row = layout.row(align=False)
+        row.scale_y = 1.1
+
+        row.operator("select.polycount", text="Select Polycount")
+        row.prop(scene, "start_count", text="")
+
+
+        row = layout.row(align=False)
+        row.scale_y = 1.1
+
+        row.operator("decimate.selected", text="New Polycount")
+        row.prop(scene, "target_count", text="")
+
+
+        row = layout.row(align=False)
+        row.scale_y = 1.1
+
+        row.operator("decimate.relative", text="Decimate %")
+        row.prop(scene, "decimate_value", text="")
+
+
 classes = (
     MESH_OT_L,
+    MESH_OT_SelectByPolycount,
+    MESH_OT_DecimateSelected,
+    MESH_OT_DecimateSelectedRelative,
     MESH_OT_delallshapekeys,
     MESH_OT_togglerimonly,
     MESH_OT_borders,
@@ -368,20 +487,34 @@ classes = (
     VIEW3D_PT_dansToolsB,
     VIEW3D_PT_dansToolsD,
     VIEW3D_PT_dansToolsC,
+    VIEW3D_PT_dansToolsE,
     MESH_OT_animshapekeys,
     MESH_OT_deleteanim,
 )
 
 
 def register():
+    bpy.types.Scene.decimate_value = FloatProperty(
+        name="decimation value", default=.1)
+    bpy.types.Scene.target_count = IntProperty(
+        name="target polycount", default=200000)
+    bpy.types.Scene.start_count = IntProperty(
+        name="start polycount", default=1000000)
+
     for cls in classes:
         bpy.utils.register_class(cls)
 
 
 def unregister():
+    del bpy.types.Scene.decimate_value
+    del bpy.types.Scene.target_count
+    del bpy.types.Scene.start_count
+
     for cls in classes:
         bpy.utils.unregister_class(cls)
 
 
 if __name__ == "__main__":
     register()
+
+
