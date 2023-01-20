@@ -14,3 +14,8 @@ def remove_corrective_smooth():
         for modifier in obj.modifiers:
             if modifier.type == 'CORRECTIVE_SMOOTH':
                 obj.modifiers.remove(modifier)
+                
+def select_selected_collection_objects():
+    collection = bpy.context.view_layer.active_layer_collection.collection
+    for obj in collection.objects:
+        obj.select_set(True)
