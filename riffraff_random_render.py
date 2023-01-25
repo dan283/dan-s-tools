@@ -19,16 +19,19 @@ def hide_and_show_random(collection_names):
         random_obj.hide_render = False
         
         
-collection_list = ['Denim', 'Bomber', 'Baseball', 'Fluro']
+collection_list = ['Hair', 'Hats', 'Glasses', 'Shoes', 'Pants', 'Socks', 'Tops']
 
 folder_path = 'e:/test/'
 
+
+frame_start = bpy.context.scene.frame_start
+frame_end = bpy.context.scene.frame_end
+iterations = 10
+
 # Render animation and save images
-for i in range(10):
+for i in range(iterations):
+    random_frame = random.randint(frame_start, frame_end)
     hide_and_show_random(collection_list)
-    bpy.context.scene.frame_set(i)
+    bpy.context.scene.frame_set(random_frame)
     bpy.context.scene.render.filepath = f"{folder_path}_{'collection_name'}_{i}"
     bpy.ops.render.render(write_still=True)
-
-
-hide_and_show_random(collection_list)
