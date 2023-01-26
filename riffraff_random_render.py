@@ -55,8 +55,9 @@ def hide_and_show_random(collection_names):
         random_obj.hide_render = False
         
         
-collection_list = ['hatHair', 'Hats', 'Glasses', 'Shoes', 'Pants', 'Socks', 'Tops']
-collection_listB = ['Hair', 'Shoes', 'Pants', 'Socks', 'Tops', 'Lashes', 'Brows', 'Eyes', 'Bodies']
+collection_list_hats = ['hatHair', 'Hats', 'Glasses', 'Shoes', 'Pants', 'Socks', 'Tops']
+collection_list = ['Hair', 'Shoes', 'Pants', 'Tops', 'Lashes', 'Brows', 'Eyes', 'Bodies']
+collection_list_socks = ['Hair', 'shoesSocks', 'Pants', 'Socks', 'Tops', 'Lashes', 'Brows', 'Eyes', 'Bodies']
 collection_list_glasses = ['Hair', 'Shoes', 'Glasses','Pants', 'Socks', 'Tops', 'Lashes', 'Brows', 'Eyes', 'Bodies']
 
 folder_path = 'e:/test/'
@@ -64,12 +65,12 @@ folder_path = 'e:/test/'
 
 frame_start = bpy.context.scene.frame_start
 frame_end = bpy.context.scene.frame_end
-iterations = 10
+iterations = 20
 
 # Render animation and save images
 for i in range(iterations):
     random_frame = random.randint(frame_start, frame_end)
-    hide_and_show_random(collection_listB)
+    hide_and_show_random(collection_list)
     bpy.context.scene.frame_set(random_frame)
     bpy.context.scene.render.filepath = f"{folder_path}{'riffraffs'}_{i}"
     bpy.ops.render.render(write_still=True)
