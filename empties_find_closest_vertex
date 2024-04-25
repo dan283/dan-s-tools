@@ -1,0 +1,49 @@
+import bpy
+import mathutils
+
+# Get the selected empty and mesh objects
+empty_obj = bpy.context.active_object
+mesh_obj = None
+
+# Find the mesh object among selected objects
+for obj in bpy.context.selected_objects:
+    if obj.type == 'MESH':
+        mesh_obj = obj
+        break
+
+if mesh_obj is None:
+    print("Error: No mesh object selected")
+else:
+    # Function to find the closest vertex to the empty
+    def find_closest_vertex(empty_loc, vertices):
+        min_distance = float('inf')
+        closest_vertex = None
+        for vertex in vertices:
+            distance = (empty_loc - vertex.co).length
+            if distance < min_distance:
+                min_distance = distance
+                closest_vertex = vertex
+        return closest_vertex
+
+    # Get the vertices of the mesh object
+    mesh_verts = mesh_obj.data.vertices
+
+    # Get the location of the empty
+    empty_loc = empty_obj.location
+
+    # Find the closest vertex
+    closest_vertex = find_closest_vertex(empty_loc, mesh_verts)
+
+    if closest_vertex is not None:
+        closest_vertex_index = int(closest_vertex.index)  # Convert index to integer
+        # Delete the closest vertex
+        bpy.context.view_layer.objects.active = mesh_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='DESELECT')
+        mesh_obj.data.vertices[closest_vertex_index].select = True
+        bpy.ops.mesh.delete(type='VERT')
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        print("Closest vertex (index {}) deleted successfully.".format(closest_vertex_index))
+    else:
+        print("Error: No closest vertex found")
