@@ -1,0 +1,113 @@
+import bpy
+
+class AnimatePanel(bpy.types.Panel):
+    """Creates a Panel in the N-Panel for Animation"""
+    bl_label = "Animate"
+    bl_idname = "OBJECT_PT_animate"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Animate'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        # Input fields
+        layout.prop(scene, "rotation_degree")
+        layout.prop(scene, "frames_hold")
+
+        # Animate button
+        layout.operator("object.animate_rotation", text="Animate")
+
+
+class AnimateOperator(bpy.types.Operator):
+    """Rotates the selected object and holds for a specified number of frames"""
+    bl_idname = "object.animate_rotation"
+    bl_label = "Animate Rotation"
+
+    def execute(self, context):
+        scene = context.scene
+        obj = context.object
+
+        if obj is None:
+            self.report({'ERROR'}, "No object selected!")
+            return {'CANCELLED'}
+
+        # Get input values
+        rotation_degree = scene.rotation_degree
+        frames_hold = scene.frames_hold
+
+        # Ensure valid inputs
+        if rotation_degree <= 0 or frames_hold < 1:
+            self.report({'ERROR'}, "Rotation degree must be > 0 and frames hold must be >= 1.")
+            return {'CANCELLED'}
+
+        # Initialize frame counter
+        frame_start = scene.frame_current
+        total_rotation = 0  # Track total rotation in degrees
+
+        # Animate the object
+        while total_rotation < 360:
+            # Keyframe the current rotation
+            obj.rotation_euler.z = total_rotation * (3.14159 / 180)  # Convert degrees to radians
+            key = obj.keyframe_insert(data_path="rotation_euler", frame=frame_start)
+
+            # Set constant interpolation for the current keyframe
+            for fcurve in obj.animation_data.action.fcurves:
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.interpolation = 'CONSTANT'
+
+            # Increment the rotation
+            total_rotation += rotation_degree
+
+            # Keyframe the next rotation step
+            frame_start += frames_hold
+            obj.rotation_euler.z = total_rotation * (3.14159 / 180)
+            key = obj.keyframe_insert(data_path="rotation_euler", frame=frame_start)
+
+            # Set constant interpolation for the next keyframe
+            for fcurve in obj.animation_data.action.fcurves:
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.interpolation = 'CONSTANT'
+
+        self.report({'INFO'}, "Animation created successfully with constant interpolation!")
+        return {'FINISHED'}
+
+
+# Properties
+def register_properties():
+    bpy.types.Scene.rotation_degree = bpy.props.FloatProperty(
+        name="Rotation Degree",
+        description="Degrees to rotate per step",
+        default=30.0,
+        min=1.0,
+        max=360.0
+    )
+    bpy.types.Scene.frames_hold = bpy.props.IntProperty(
+        name="Frames Hold",
+        description="Number of frames to hold rotation",
+        default=10,
+        min=1
+    )
+
+
+def unregister_properties():
+    del bpy.types.Scene.rotation_degree
+    del bpy.types.Scene.frames_hold
+
+
+# Registration
+classes = [AnimatePanel, AnimateOperator]
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    register_properties()
+
+def unregister():
+    for cls in classes:
+        bpy.utils.unregister_class(cls)
+    unregister_properties()
+
+if __name__ == "__main__":
+    register()
