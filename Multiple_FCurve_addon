@@ -1,0 +1,123 @@
+bl_info = {
+    "name": "Jettam Modifier",
+    "blender": (3, 0, 0),
+    "category": "Animation",
+    "author": "ChatGPT",
+    "description": "Easily apply and manage F-Curve modifiers for selected objects.",
+}
+
+import bpy
+
+# List of supported F-Curve Modifiers
+FCURVE_MODIFIERS = {
+    "NOISE": "Noise",
+    "GENERATOR": "Generator",
+    "BUILTIN_FUNCTION": "Built-in Function",
+    "LIMITS": "Limits",
+    "ENVELOPE": "Envelope",
+    "STEPPED": "Stepped",
+    "CYCLES": "Cycles",
+}
+
+def get_selected_modifier(context):
+    """Find the first selected object's modifier of the chosen type"""
+    mod_type = context.scene.jettam_modifier_type
+
+    for obj in context.selected_objects:
+        if obj.animation_data and obj.animation_data.action:
+            for fcurve in obj.animation_data.action.fcurves:
+                for mod in fcurve.modifiers:
+                    if mod.type == mod_type:
+                        return mod  # Return the first found modifier
+
+    return None  # No modifier found
+
+
+class JETTAM_OT_ApplyModifier(bpy.types.Operator):
+    """Apply settings of the selected modifier to all selected objects"""
+    bl_idname = "jettam.apply_modifier"
+    bl_label = "Apply Modifier"
+
+    def execute(self, context):
+        scene = context.scene
+        mod_type = scene.jettam_modifier_type
+
+        # Get the first selected modifier to copy its settings
+        ref_modifier = get_selected_modifier(context)
+        if not ref_modifier:
+            self.report({'WARNING'}, f"No existing {mod_type} modifier found. Adding new ones.")
+        
+        for obj in context.selected_objects:
+            if obj.animation_data and obj.animation_data.action:
+                for fcurve in obj.animation_data.action.fcurves:
+                    # Check if modifier exists, if not, create it
+                    mod = None
+                    for existing_mod in fcurve.modifiers:
+                        if existing_mod.type == mod_type:
+                            mod = existing_mod
+                            break
+                    
+                    if not mod:  # Add a new modifier if none exists
+                        mod = fcurve.modifiers.new(type=mod_type)
+
+                    # Copy only modifiable settings from the reference modifier
+                    if ref_modifier:
+                        for prop in ref_modifier.bl_rna.properties:
+                            if prop.is_readonly or prop.identifier in {"bl_rna", "type"}:
+                                continue  # Skip read-only properties
+                            setattr(mod, prop.identifier, getattr(ref_modifier, prop.identifier))
+
+        self.report({'INFO'}, f"Applied {mod_type} Modifier settings to selected objects.")
+        return {'FINISHED'}
+
+
+class JETTAM_PT_ModifierPanel(bpy.types.Panel):
+    """Creates the Jettam Modifier panel in the N-panel"""
+    bl_label = "Jettam Modifier"
+    bl_idname = "JETTAM_PT_ModifierPanel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Jettam Modifier"
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        # Dropdown for selecting an F-Curve Modifier type
+        layout.prop(scene, "jettam_modifier_type", text="Modifier Type")
+
+        # Display modifier settings (only for one modifier)
+        modifier = get_selected_modifier(context)
+        if modifier:
+            col = layout.column()
+            col.label(text=f"{modifier.type} Settings:")
+
+            for prop in modifier.bl_rna.properties:
+                if prop.is_readonly or prop.identifier in {"bl_rna", "type"}:
+                    continue  # Skip read-only properties
+                col.prop(modifier, prop.identifier)
+
+        layout.operator("jettam.apply_modifier", text="Apply to Selected", icon="CHECKMARK")
+
+
+def register():
+    bpy.utils.register_class(JETTAM_OT_ApplyModifier)
+    bpy.utils.register_class(JETTAM_PT_ModifierPanel)
+    
+    # Create dropdown property
+    bpy.types.Scene.jettam_modifier_type = bpy.props.EnumProperty(
+        name="F-Curve Modifier",
+        description="Select an F-Curve Modifier",
+        items=[(key, value, "") for key, value in FCURVE_MODIFIERS.items()],
+        default="NOISE"
+    )
+
+
+def unregister():
+    bpy.utils.unregister_class(JETTAM_OT_ApplyModifier)
+    bpy.utils.unregister_class(JETTAM_PT_ModifierPanel)
+    del bpy.types.Scene.jettam_modifier_type
+
+
+if __name__ == "__main__":
+    register()
