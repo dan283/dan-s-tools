@@ -8,6 +8,8 @@ class ImageCropper:
     def __init__(self, root):
         self.root = root
         self.root.title("Image Cropper")
+        self.root.geometry("800x600")
+        self.root.configure(bg="#2E3440")
 
         self.image_list = []
         self.current_image_index = 0
@@ -18,30 +20,31 @@ class ImageCropper:
         self.suffix = tk.StringVar()
 
         # UI Components
-        self.canvas = tk.Canvas(root, cursor="cross")
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas = tk.Canvas(root, cursor="cross", bg="#4C566A", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        self.btn_frame = tk.Frame(root)
-        self.btn_frame.pack()
+        self.btn_frame = tk.Frame(root, bg="#2E3440")
+        self.btn_frame.pack(pady=10)
 
-        self.load_btn = tk.Button(self.btn_frame, text="Load Images", command=self.load_images)
-        self.load_btn.pack(side=tk.LEFT)
+        button_style = {"bg": "#5E81AC", "fg": "white", "font": ("Arial", 12), "relief": "flat", "padx": 10, "pady": 5}
+        entry_style = {"bg": "#434C5E", "fg": "white", "insertbackground": "white", "font": ("Arial", 12), "width": 12}
 
-        self.prev_btn = tk.Button(self.btn_frame, text="Previous", command=self.prev_image)
-        self.prev_btn.pack(side=tk.LEFT)
+        self.load_btn = tk.Button(self.btn_frame, text="Load Images", command=self.load_images, **button_style)
+        self.load_btn.pack(side=tk.LEFT, padx=5)
 
-        self.next_btn = tk.Button(self.btn_frame, text="Next", command=self.next_image)
-        self.next_btn.pack(side=tk.LEFT)
+        self.prev_btn = tk.Button(self.btn_frame, text="Previous", command=self.prev_image, **button_style)
+        self.prev_btn.pack(side=tk.LEFT, padx=5)
 
-        self.save_btn = tk.Button(self.btn_frame, text="Save Crop", command=self.save_crop)
-        self.save_btn.pack(side=tk.LEFT)
+        self.next_btn = tk.Button(self.btn_frame, text="Next", command=self.next_image, **button_style)
+        self.next_btn.pack(side=tk.LEFT, padx=5)
 
-        self.suffix_entry = tk.Entry(self.btn_frame, textvariable=self.suffix, width=10)
-        self.suffix_entry.pack(side=tk.LEFT)
+        self.suffix_entry = tk.Entry(self.btn_frame, textvariable=self.suffix, **entry_style)
+        self.suffix_entry.pack(side=tk.LEFT, padx=5)
         self.suffix_entry.insert(0, "_cropped")
 
-        self.auto_save_check = tk.Checkbutton(self.btn_frame, text="Auto Save", variable=self.auto_save)
-        self.auto_save_check.pack(side=tk.LEFT)
+        self.auto_save_check = tk.Checkbutton(self.btn_frame, text="Auto Save", variable=self.auto_save, bg="#2E3440",
+                                              fg="white", font=("Arial", 12), selectcolor="#5E81AC")
+        self.auto_save_check.pack(side=tk.LEFT, padx=5)
 
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
@@ -86,19 +89,20 @@ class ImageCropper:
 
     def on_release(self, event):
         self.crop_coords = (self.start_x, self.start_y, event.x, event.y)
+        self.save_crop()
 
     def save_crop(self):
         if not self.crop_coords or not self.image_list:
-            messagebox.showerror("Error", "No crop region selected or no image loaded!")
             return
 
         x1, y1, x2, y2 = self.crop_coords
         cropped = self.img.crop((x1, y1, x2, y2))
 
-        if self.auto_save.get():
-            image_path = self.image_list[self.current_image_index]
-            dir_name, base_name = os.path.split(image_path)
-            name, ext = os.path.splitext(base_name)
+        image_path = self.image_list[self.current_image_index]
+        dir_name, base_name = os.path.split(image_path)
+        name, ext = os.path.splitext(base_name)
+
+        if self.auto_save.get() and self.suffix.get():
             save_path = os.path.join(dir_name, f"{name}{self.suffix.get()}{ext}")
             cropped.save(save_path)
             messagebox.showinfo("Success", f"Cropped image saved automatically as {save_path}")
