@@ -3,6 +3,7 @@ import bpy
 class CopyTransformsProperties(bpy.types.PropertyGroup):
     source_prefix: bpy.props.StringProperty(name="Source Prefix")
     target_prefix: bpy.props.StringProperty(name="Target Prefix")
+    selection_only: bpy.props.BoolProperty(name="Selection Only", default=False)
 
 class COPYTRANSFORMS_PT_panel(bpy.types.Panel):
     bl_label = "Copy Transforms"
@@ -17,6 +18,7 @@ class COPYTRANSFORMS_PT_panel(bpy.types.Panel):
 
         layout.prop(props, "source_prefix")
         layout.prop(props, "target_prefix")
+        layout.prop(props, "selection_only")
         layout.operator("object.copy_transforms_constraints")
 
 class OBJECT_OT_CopyTransformsOperator(bpy.types.Operator):
@@ -28,6 +30,7 @@ class OBJECT_OT_CopyTransformsOperator(bpy.types.Operator):
         props = context.scene.copy_transforms_props
         source_prefix = props.source_prefix
         target_prefix = props.target_prefix
+        selection_only = props.selection_only
 
         obj = context.object
         if not obj or obj.type != 'ARMATURE':
@@ -38,7 +41,11 @@ class OBJECT_OT_CopyTransformsOperator(bpy.types.Operator):
             self.report({'ERROR'}, "Must be in Pose Mode.")
             return {'CANCELLED'}
 
-        for bone in obj.pose.bones:
+        bones = obj.pose.bones
+
+        for bone in bones:
+            if selection_only and not bone.bone.select:
+                continue
             if not bone.name.startswith(target_prefix):
                 continue
 
