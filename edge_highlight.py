@@ -1,3 +1,13 @@
+bl_info = {
+    "name": "Thick Edges Overlay",
+    "author": "Dan Ulrich",
+    "version": (1, 0, 0),
+    "blender": (4, 0, 0),
+    "location": "3D Viewport > Overlays",
+    "description": "Display selected edges with customizable thickness and color in the viewport overlays",
+    "category": "Mesh",
+}
+
 import bpy
 import bmesh
 import gpu
@@ -86,32 +96,6 @@ def stop_auto_update():
 
 
 def get_selected_edge_coords():
-    """Get coordinates of selected edges in world space"""
-    context = bpy.context
-    
-    if not context.active_object or context.active_object.type != 'MESH':
-        return []
-    
-    obj = context.active_object
-    
-    # Ensure we're in edit mode
-    if context.mode != 'EDIT_MESH':
-        return []
-    
-    # Get bmesh representation
-    bm = bmesh.from_edit_mesh(obj.data)
-    
-    coords = []
-    
-    # Get selected edges
-    for edge in bm.edges:
-        if edge.select:
-            # Convert local coordinates to world coordinates
-            v1_world = obj.matrix_world @ edge.verts[0].co
-            v2_world = obj.matrix_world @ edge.verts[1].co
-            coords.extend([v1_world, v2_world])
-    
-    return coords
     """Get coordinates of selected edges in world space"""
     context = bpy.context
     
@@ -242,68 +226,7 @@ class MESH_OT_toggle_thick_edges(Operator):
         return {'FINISHED'}
 
 
-class MESH_OT_toggle_auto_update(Operator):
-    """Toggle automatic update of thick edges when selection changes"""
-    bl_idname = "mesh.toggle_auto_update"
-    bl_label = "Toggle Auto Update"
-    bl_options = {'REGISTER'}
-    
-    def execute(self, context):
-        global auto_update_enabled, is_drawing
-        
-        scene = context.scene
-        auto_update_enabled = scene.thick_edges_props.auto_update
-        
-        if auto_update_enabled and is_drawing:
-            # Enable auto-update
-            start_auto_update()
-            self.report({'INFO'}, "Auto-update enabled")
-        else:
-            # Disable auto-update
-            stop_auto_update()
-            if auto_update_enabled:
-                self.report({'INFO'}, "Auto-update disabled (thick edges not active)")
-            else:
-                self.report({'INFO'}, "Auto-update disabled")
-        
-        return {'FINISHED'}
-
-
 class MESH_OT_update_thick_edges(Operator):
-    """Update thick edge display with current selection"""
-    bl_idname = "mesh.update_thick_edges"
-    bl_label = "Update Selection"
-    bl_options = {'REGISTER'}
-    
-    def execute(self, context):
-        global is_drawing
-        
-        if not is_drawing:
-            self.report({'INFO'}, "Thick edges not enabled")
-            return {'CANCELLED'}
-        
-        if not context.active_object or context.active_object.type != 'MESH':
-            self.report({'ERROR'}, "Please select a mesh object")
-            return {'CANCELLED'}
-        
-        if context.mode != 'EDIT_MESH':
-            self.report({'ERROR'}, "Please enter Edit Mode")
-            return {'CANCELLED'}
-        
-        # Update the edge display
-        update_edge_display()
-        
-        if edge_coords:
-            self.report({'INFO'}, f"Updated thick edges for {len(edge_coords)//2} edges")
-        else:
-            self.report({'WARNING'}, "No edges selected")
-        
-        # Refresh viewport
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-        
-        return {'FINISHED'}
     """Update thick edge display with current selection"""
     bl_idname = "mesh.update_thick_edges"
     bl_label = "Update Selection"
@@ -343,7 +266,6 @@ class MESH_OT_update_thick_edges(Operator):
 class ThickEdgesProperties(bpy.types.PropertyGroup):
     thickness: FloatProperty(
         name="Thickness",
-        description="Thickness of selected edges",
         default=5.0,
         min=1.0,
         max=20.0
@@ -351,7 +273,6 @@ class ThickEdgesProperties(bpy.types.PropertyGroup):
     
     color: bpy.props.FloatVectorProperty(
         name="Color",
-        description="Color of thick edges",
         subtype='COLOR',
         default=(1.0, 0.3, 0.0),  # Orange
         min=0.0,
@@ -359,21 +280,31 @@ class ThickEdgesProperties(bpy.types.PropertyGroup):
     )
     
     auto_update: BoolProperty(
-        name="Auto Update Selection",
-        description="Automatically update thick edges when selection changes",
+        name="Auto Update",
         default=False,
-        update=lambda self, context: bpy.ops.mesh.toggle_auto_update()
+        update=lambda self, context: update_auto_update_setting(self, context)
     )
 
 
-class VIEW3D_PT_thick_edges(Panel):
-    """Thick Edges Panel"""
+def update_auto_update_setting(self, context):
+    """Handle auto-update setting changes"""
+    global auto_update_enabled, is_drawing
+    
+    auto_update_enabled = self.auto_update
+    
+    if auto_update_enabled and is_drawing:
+        start_auto_update()
+    else:
+        stop_auto_update()
+
+
+class VIEW3D_PT_thick_edges_overlay(Panel):
+    """Thick Edges Overlay Panel"""
     bl_label = "Thick Edges"
-    bl_idname = "VIEW3D_PT_thick_edges"
+    bl_idname = "VIEW3D_PT_thick_edges_overlay"
     bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Tool"
-    bl_context = "mesh_edit"
+    bl_region_type = 'HEADER'
+    bl_parent_id = "VIEW3D_PT_overlay"
     
     @classmethod
     def poll(cls, context):
@@ -386,47 +317,27 @@ class VIEW3D_PT_thick_edges(Panel):
         scene = context.scene
         props = scene.thick_edges_props
         
-        # Properties
-        col = layout.column(align=True)
-        col.prop(props, "thickness")
-        col.prop(props, "color")
-        
-        # Auto-update checkbox
-        layout.separator()
-        row = layout.row()
-        row.prop(props, "auto_update")
-        
-        # Buttons
-        layout.separator()
-        
         # Toggle button
-        row = layout.row()
+        row = layout.row(align=True)
         if is_drawing:
-            row.operator("mesh.toggle_thick_edges", text="Disable Thick Edges", icon='HIDE_ON')
+            row.operator("mesh.toggle_thick_edges", text="", icon='HIDE_ON', depress=True)
         else:
-            row.operator("mesh.toggle_thick_edges", text="Enable Thick Edges", icon='HIDE_OFF')
+            row.operator("mesh.toggle_thick_edges", text="", icon='HIDE_OFF')
         
-        # Update button (only show when enabled and auto-update is off)
+        # Properties in the same row
+        sub = row.row(align=True)
+        sub.enabled = is_drawing
+        sub.prop(props, "thickness", text="")
+        sub.prop(props, "color", text="")
+        
+        # Auto-update and manual update
+        row = layout.row(align=True)
+        row.enabled = is_drawing
+        row.prop(props, "auto_update", text="Auto")
+        
+        # Manual update button (only when not auto-updating)
         if is_drawing and not props.auto_update:
-            row = layout.row()
-            row.operator("mesh.update_thick_edges", text="Update Selection", icon='FILE_REFRESH')
-        
-        # Info
-        layout.separator()
-        box = layout.box()
-        box.label(text="Info:", icon='INFO')
-        box.label(text="Select edges and click Enable")
-        if not props.auto_update:
-            box.label(text="Use Update Selection after")
-            box.label(text="changing edge selection")
-        else:
-            box.label(text="Selection updates automatically")
-        
-        if is_drawing:
-            box.label(text=f"Displaying: {len(edge_coords)//2} edges", icon='CHECKMARK')
-        
-        if props.auto_update and is_drawing:
-            box.label(text="Auto-update: ON", icon='PLAY')
+            row.operator("mesh.update_thick_edges", text="", icon='FILE_REFRESH')
 
 
 # Clean up function
@@ -450,10 +361,9 @@ def cleanup_thick_edges():
 # Registration
 classes = (
     MESH_OT_toggle_thick_edges,
-    MESH_OT_toggle_auto_update,
     MESH_OT_update_thick_edges,
     ThickEdgesProperties,
-    VIEW3D_PT_thick_edges,
+    VIEW3D_PT_thick_edges_overlay,
 )
 
 def register():
