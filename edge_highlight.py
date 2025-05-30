@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Thick Edges Overlay",
-    "author": "Dan Ulrich",
+    "author": "Your Name",
     "version": (1, 0, 0),
-    "blender": (4, 0, 0),
+    "blender": (3, 0, 0),
     "location": "3D Viewport > Overlays",
     "description": "Display selected edges with customizable thickness and color in the viewport overlays",
     "category": "Mesh",
@@ -20,8 +20,10 @@ import mathutils
 # Global variables to store the drawing handler and batch data
 draw_handler = None
 edge_batch = None
+active_edge_batch = None
 shader = None
 edge_coords = []
+active_edge_coords = []
 is_drawing = False
 auto_update_enabled = False
 update_timer = None
@@ -96,22 +98,39 @@ def stop_auto_update():
 
 
 def get_selected_edge_coords():
-    """Get coordinates of selected edges in world space"""
+    """Get coordinates of selected edges in world space, separating active edge"""
     context = bpy.context
     
     if not context.active_object or context.active_object.type != 'MESH':
-        return []
+        return [], []
     
     obj = context.active_object
     
     # Ensure we're in edit mode
     if context.mode != 'EDIT_MESH':
-        return []
+        return [], []
     
     # Get bmesh representation
     bm = bmesh.from_edit_mesh(obj.data)
     
+    # Ensure indices are valid
+    bm.edges.ensure_lookup_table()
+    
     coords = []
+    active_coords = []
+    
+    # Get the history to find the active (last selected) edge
+    active_edge = None
+    if bm.select_history:
+        # Get the last selected element from history
+        last_selected = bm.select_history[-1]
+        if isinstance(last_selected, bmesh.types.BMEdge) and last_selected.select:
+            active_edge = last_selected
+    
+    # If no active edge from history, try to get it from bmesh
+    if not active_edge and hasattr(bm.edges, 'active') and bm.edges.active:
+        if bm.edges.active.select:
+            active_edge = bm.edges.active
     
     # Get selected edges
     for edge in bm.edges:
@@ -119,31 +138,46 @@ def get_selected_edge_coords():
             # Convert local coordinates to world coordinates
             v1_world = obj.matrix_world @ edge.verts[0].co
             v2_world = obj.matrix_world @ edge.verts[1].co
-            coords.extend([v1_world, v2_world])
+            
+            # Check if this is the active edge
+            if active_edge and edge == active_edge:
+                active_coords.extend([v1_world, v2_world])
+            else:
+                coords.extend([v1_world, v2_world])
     
-    return coords
+    return coords, active_coords
 
 
 def draw_thick_edges():
     """Draw thick lines for selected edges"""
-    global edge_batch, shader, is_drawing
+    global edge_batch, active_edge_batch, shader, is_drawing
     
-    if not is_drawing or not edge_batch:
+    if not is_drawing:
         return
     
-    # Get thickness from scene properties
+    # Get settings from scene properties
     scene = bpy.context.scene
     thickness = scene.thick_edges_props.thickness
     color = scene.thick_edges_props.color
+    active_color = scene.thick_edges_props.active_color
+    active_thickness = scene.thick_edges_props.active_thickness
     
-    # Enable line smooth and set line width
-    gpu.state.line_width_set(thickness)
+    # Enable line smooth and blend
     gpu.state.blend_set('ALPHA')
     
-    # Draw the edges with color
-    shader.bind()
-    shader.uniform_float("color", (color[0], color[1], color[2], 1.0))
-    edge_batch.draw(shader)
+    # Draw regular selected edges
+    if edge_batch:
+        gpu.state.line_width_set(thickness)
+        shader.bind()
+        shader.uniform_float("color", (color[0], color[1], color[2], 1.0))
+        edge_batch.draw(shader)
+    
+    # Draw active edge with different color/thickness
+    if active_edge_batch:
+        gpu.state.line_width_set(active_thickness)
+        shader.bind()
+        shader.uniform_float("color", (active_color[0], active_color[1], active_color[2], 1.0))
+        active_edge_batch.draw(shader)
     
     # Restore state
     gpu.state.line_width_set(1.0)
@@ -152,23 +186,31 @@ def draw_thick_edges():
 
 def update_edge_display():
     """Update the edge batch with current selection"""
-    global edge_batch, shader, edge_coords
+    global edge_batch, active_edge_batch, shader, edge_coords, active_edge_coords
     
     # Get current selected edge coordinates
-    edge_coords = get_selected_edge_coords()
-    
-    if not edge_coords:
-        edge_batch = None
-        return
+    edge_coords, active_edge_coords = get_selected_edge_coords()
     
     # Use built-in shader for better compatibility
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     
-    # Create batch for lines
-    edge_batch = batch_for_shader(
-        shader, 'LINES',
-        {"pos": edge_coords}
-    )
+    # Create batch for regular selected edges
+    if edge_coords:
+        edge_batch = batch_for_shader(
+            shader, 'LINES',
+            {"pos": edge_coords}
+        )
+    else:
+        edge_batch = None
+    
+    # Create batch for active edge
+    if active_edge_coords:
+        active_edge_batch = batch_for_shader(
+            shader, 'LINES',
+            {"pos": active_edge_coords}
+        )
+    else:
+        active_edge_batch = None
 
 
 class MESH_OT_toggle_thick_edges(Operator):
@@ -202,7 +244,7 @@ class MESH_OT_toggle_thick_edges(Operator):
         else:
             # Enable thick edges
             update_edge_display()
-            if edge_coords:
+            if edge_coords or active_edge_coords:
                 draw_handler = bpy.types.SpaceView3D.draw_handler_add(
                     draw_thick_edges, (), 'WINDOW', 'POST_VIEW'
                 )
@@ -214,7 +256,8 @@ class MESH_OT_toggle_thick_edges(Operator):
                 if auto_update_enabled:
                     start_auto_update()
                 
-                self.report({'INFO'}, f"Thick edges enabled for {len(edge_coords)//2} edges")
+                total_edges = len(edge_coords)//2 + len(active_edge_coords)//2
+                self.report({'INFO'}, f"Thick edges enabled for {total_edges} edges")
             else:
                 self.report({'WARNING'}, "No edges selected")
         
@@ -250,8 +293,9 @@ class MESH_OT_update_thick_edges(Operator):
         # Update the edge display
         update_edge_display()
         
-        if edge_coords:
-            self.report({'INFO'}, f"Updated thick edges for {len(edge_coords)//2} edges")
+        if edge_coords or active_edge_coords:
+            total_edges = len(edge_coords)//2 + len(active_edge_coords)//2
+            self.report({'INFO'}, f"Updated thick edges for {total_edges} edges")
         else:
             self.report({'WARNING'}, "No edges selected")
         
@@ -275,6 +319,21 @@ class ThickEdgesProperties(bpy.types.PropertyGroup):
         name="Color",
         subtype='COLOR',
         default=(1.0, 0.3, 0.0),  # Orange
+        min=0.0,
+        max=1.0
+    )
+    
+    active_thickness: FloatProperty(
+        name="Active Thickness",
+        default=8.0,
+        min=1.0,
+        max=20.0
+    )
+    
+    active_color: bpy.props.FloatVectorProperty(
+        name="Active Color",
+        subtype='COLOR',
+        default=(1.0, 1.0, 0.0),  # Yellow
         min=0.0,
         max=1.0
     )
@@ -324,11 +383,18 @@ class VIEW3D_PT_thick_edges_overlay(Panel):
         else:
             row.operator("mesh.toggle_thick_edges", text="", icon='HIDE_OFF')
         
-        # Properties in the same row
+        # Regular edge properties
         sub = row.row(align=True)
         sub.enabled = is_drawing
         sub.prop(props, "thickness", text="")
         sub.prop(props, "color", text="")
+        
+        # Active edge properties
+        row = layout.row(align=True)
+        row.enabled = is_drawing
+        row.label(text="Active:")
+        row.prop(props, "active_thickness", text="")
+        row.prop(props, "active_color", text="")
         
         # Auto-update and manual update
         row = layout.row(align=True)
