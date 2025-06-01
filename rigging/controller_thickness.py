@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Thick Bones Overlay",
-    "author": "Dan Ulrich", 
-    "version": (1, 0, 0),
-    "blender": (4, 0, 0),
-    "location": "3D Viewport > Overlays (Pose Mode)",
-    "description": "Display selected bones with customizable thickness overlay in pose mode",
+    "author": "Your Name", 
+    "version": (1, 0, 3),
+    "blender": (3, 0, 0),
+    "location": "3D Viewport > Overlays > Armature (Pose Mode)",
+    "description": "Display selected bones with customizable thickness overlay for custom shapes in pose mode",
     "category": "Rigging",
 }
 
@@ -12,7 +12,7 @@ import bpy
 import bmesh
 import gpu
 from gpu_extras.batch import batch_for_shader
-from bpy.props import FloatProperty, BoolProperty, EnumProperty
+from bpy.props import FloatProperty, BoolProperty
 from bpy.types import Panel, Operator
 import mathutils
 from mathutils import Vector, Matrix
@@ -21,11 +21,8 @@ from bpy.app.handlers import persistent
 
 # Global variables
 draw_handler = None
-bone_batch = None
-active_bone_batch = None
+bone_batches = {}  # Dictionary to store batches for each bone with its color
 shader = None
-bone_lines = []
-active_bone_lines = []
 is_drawing = False
 auto_update_enabled = True
 update_timer = None
@@ -70,7 +67,11 @@ def get_selection_hash():
         if armature.data.bones.active:
             active_bone_name = armature.data.bones.active.name
         
-        return hash((tuple(sorted(selected_bones)), active_bone_name))
+        # Include enable_all state in hash
+        scene = context.scene
+        enable_all = scene.thick_bones_props.enable_all
+        
+        return hash((tuple(sorted(selected_bones)), active_bone_name, enable_all))
     except Exception as e:
         print(f"Selection hash error: {e}")
         return None
@@ -88,19 +89,28 @@ def get_pose_hash():
     
     try:
         armature = context.active_object
+        scene = context.scene
+        enable_all = scene.thick_bones_props.enable_all
         
-        # Create hash based on selected bone transforms
+        # Create hash based on bone transforms (selected or all based on enable_all)
         bone_transforms = []
         for bone in armature.pose.bones:
-            if bone.bone.select:
+            should_include = enable_all and bone.custom_shape or (bone.bone.select and bone.custom_shape)
+            if should_include:
                 # Get bone matrix for transform comparison
                 matrix_tuple = tuple(tuple(row) for row in bone.matrix)
-                bone_transforms.append((bone.name, matrix_tuple))
+                # Include custom shape transform properties
+                shape_props = (
+                    tuple(bone.custom_shape_scale_xyz),
+                    tuple(bone.custom_shape_rotation_euler),
+                    tuple(bone.custom_shape_translation)
+                )
+                bone_transforms.append((bone.name, matrix_tuple, shape_props))
         
         # Include object transform
         obj_matrix = tuple(tuple(row) for row in armature.matrix_world)
         
-        return hash((tuple(bone_transforms), obj_matrix))
+        return hash((tuple(bone_transforms), obj_matrix, enable_all))
     except Exception as e:
         print(f"Pose hash error: {e}")
         return None
@@ -125,6 +135,446 @@ def is_valid_context():
     return True
 
 
+def should_auto_enable():
+    """Check if we should auto-enable when entering pose mode"""
+    context = bpy.context
+    scene = context.scene
+    
+    # Check if auto-enable is turned on and we're in valid context
+    return (hasattr(scene, 'thick_bones_props') and 
+            scene.thick_bones_props.auto_enable and 
+            is_valid_context())
+
+
+def get_bone_color(bone, armature_obj):
+    """Get the color from BoneColor properties, else default theme colors"""
+    context = bpy.context
+    
+    try:
+        armature_data = armature_obj.data
+        pose_bone = armature_obj.pose.bones.get(bone.name)
+        active_bone = armature_data.bones.active
+        is_active = active_bone and bone == active_bone
+        
+        # Check pose bone color first
+        if pose_bone and hasattr(pose_bone, 'color') and pose_bone.color.palette != 'DEFAULT':
+            if pose_bone.color.palette == 'CUSTOM':
+                # Use custom color
+                base_color = pose_bone.color.custom.normal[:3]
+                if is_active:
+                    return tuple(min(1.0, c * 1.3) for c in base_color)
+                else:
+                    return base_color
+            else:
+                # Use theme color palette
+                theme_color = get_bone_color_palette(pose_bone.color.palette, is_active)
+                if theme_color:
+                    return theme_color
+        
+        # Fallback to armature bone color
+        if hasattr(bone, 'color') and bone.color.palette != 'DEFAULT':
+            if bone.color.palette == 'CUSTOM':
+                # Use custom color
+                base_color = bone.color.custom.normal[:3]
+                if is_active:
+                    return tuple(min(1.0, c * 1.3) for c in base_color)
+                else:
+                    return base_color
+            else:
+                # Use theme color palette
+                theme_color = get_bone_color_palette(bone.color.palette, is_active)
+                if theme_color:
+                    return theme_color
+        
+        # Final fallback: default theme colors based on bone state
+        theme = context.preferences.themes[0]
+        
+        if is_active:
+            return theme.view_3d.bone_pose_active[:3]  # Active bone color
+        elif bone.select:
+            return theme.view_3d.bone_pose[:3]  # Selected bone color
+        else:
+            return theme.view_3d.bone_solid[:3]  # Normal bone color
+            
+    except Exception as e:
+        print(f"Error getting bone color for {bone.name}: {e}")
+        # Hard fallback to simple colors
+        armature_data = armature_obj.data
+        active_bone = armature_data.bones.active
+        
+        if active_bone and bone == active_bone:
+            return (1.0, 1.0, 0.0)  # Yellow for active
+        elif bone.select:
+            return (0.0, 0.8, 1.0)  # Light blue for selected
+        else:
+            return (0.5, 0.5, 0.5)  # Gray for normal
+
+def get_collection_color_set(color_set, is_active=False):
+    """Get color from bone collection color set"""
+    collection_colors = {
+        'THEME01': (0.8, 0.2, 0.2),    # Red
+        'THEME02': (0.2, 0.8, 0.2),    # Green  
+        'THEME03': (0.2, 0.2, 0.8),    # Blue
+        'THEME04': (0.8, 0.8, 0.2),    # Yellow
+        'THEME05': (0.8, 0.2, 0.8),    # Magenta
+        'THEME06': (0.2, 0.8, 0.8),    # Cyan
+        'THEME07': (0.8, 0.5, 0.2),    # Orange
+        'THEME08': (0.5, 0.2, 0.8),    # Purple
+        'THEME09': (0.5, 0.8, 0.2),    # Light Green
+        'THEME10': (0.8, 0.2, 0.5),    # Pink
+        'THEME11': (0.2, 0.5, 0.8),    # Light Blue
+        'THEME12': (0.5, 0.5, 0.5),    # Gray
+        'THEME13': (0.7, 0.7, 0.7),    # Light Gray
+        'THEME14': (0.3, 0.3, 0.3),    # Dark Gray
+        'THEME15': (0.7, 0.4, 0.2),    # Brown
+        'THEME16': (0.4, 0.7, 0.2),    # Lime
+        'THEME17': (0.2, 0.4, 0.7),    # Navy
+        'THEME18': (0.7, 0.2, 0.4),    # Maroon
+        'THEME19': (0.6, 0.3, 0.7),    # Violet
+        'THEME20': (0.3, 0.7, 0.6),    # Teal
+    }
+    
+    color = collection_colors.get(color_set, (0.5, 0.5, 0.5))
+    
+    if is_active:
+        # Brighten active bone
+        return tuple(min(1.0, c * 1.3) for c in color)
+    
+    return color
+
+
+def get_bone_color_palette(palette, is_active=False):
+    """Get color from bone color palette"""
+    palette_colors = {
+        'THEME01': (1.0, 0.0, 0.0),    # Red
+        'THEME02': (0.0, 1.0, 0.0),    # Green
+        'THEME03': (0.0, 0.0, 1.0),    # Blue
+        'THEME04': (1.0, 1.0, 0.0),    # Yellow
+        'THEME05': (1.0, 0.0, 1.0),    # Magenta
+        'THEME06': (0.0, 1.0, 1.0),    # Cyan
+        'THEME07': (1.0, 0.5, 0.0),    # Orange
+        'THEME08': (0.5, 0.0, 1.0),    # Purple
+        'THEME09': (0.5, 1.0, 0.0),    # Light Green
+        'THEME10': (1.0, 0.0, 0.5),    # Pink
+        'THEME11': (0.0, 0.5, 1.0),    # Light Blue
+        'THEME12': (0.5, 0.5, 0.5),    # Gray
+        'THEME13': (0.8, 0.8, 0.8),    # Light Gray
+        'THEME14': (0.2, 0.2, 0.2),    # Dark Gray
+        'THEME15': (0.8, 0.4, 0.2),    # Brown
+        'THEME16': (0.4, 0.8, 0.2),    # Lime
+        'THEME17': (0.2, 0.4, 0.8),    # Navy
+        'THEME18': (0.8, 0.2, 0.4),    # Maroon
+        'THEME19': (0.6, 0.3, 0.8),    # Violet
+        'THEME20': (0.3, 0.8, 0.6),    # Teal
+    }
+    
+    color = palette_colors.get(palette, (0.5, 0.5, 0.5))
+    
+    if is_active:
+        # Brighten active bone
+        return tuple(min(1.0, c * 1.3) for c in color)
+    
+    return color
+
+
+def is_bone_collection_visible(bone, armature_obj):
+    """Check if bone is visible based on bone collection visibility"""
+    try:
+        # Check if bone collections exist (Blender 3.0+)
+        if not hasattr(bone, 'collections'):
+            return True
+        
+        # If bone has no collections, it's visible by default
+        if not bone.collections:
+            return True
+        
+        # Check if any of the bone's collections are visible
+        for collection in bone.collections:
+            if hasattr(collection, 'is_visible') and collection.is_visible:
+                return True
+        
+        # If no collections are visible, bone is hidden
+        return False
+        
+    except Exception as e:
+        print(f"Error checking bone collection visibility for {bone.name}: {e}")
+        return True  # Default to visible on error
+
+
+def get_custom_shape_wireframe_lines(bone, armature_obj):
+    """Generate wireframe lines for a bone's custom shape using exact Blender transforms"""
+    lines = []
+    
+    try:
+        pose_bone = armature_obj.pose.bones[bone.name]
+        
+        # Only process bones with custom shapes
+        if not pose_bone.custom_shape:
+            return lines
+        
+        # Check if bone is visible (bone collection visibility)
+        if not is_bone_collection_visible(bone, armature_obj):
+            return lines
+        
+        # Use custom shape mesh
+        custom_shape = pose_bone.custom_shape
+        
+        # Handle both mesh objects and empties used as custom shapes
+        if custom_shape.type == 'MESH':
+            # Create temporary bmesh from custom shape mesh
+            bm = bmesh.new()
+            bm.from_mesh(custom_shape.data)
+            
+            # FIXED: Calculate the exact transform matrix that matches Blender's custom shape rendering
+            
+            # Get armature object's world matrix
+            armature_matrix = armature_obj.matrix_world
+            
+            # Get the transform bone matrix (or pose bone matrix if no custom transform)
+            if pose_bone.custom_shape_transform:
+                transform_bone = armature_obj.pose.bones[pose_bone.custom_shape_transform.name]
+                bone_matrix = transform_bone.matrix
+            else:
+                bone_matrix = pose_bone.matrix
+            
+            # Create the custom shape transformation matrix
+            # This follows Blender's exact transformation order and scaling
+            
+            # 1. Create scale matrix from custom_shape_scale_xyz
+            # NOTE: Blender applies bone length scaling here, which we need to account for
+            bone_length = bone.length if bone.length > 0 else 1.0
+            scale_xyz = pose_bone.custom_shape_scale_xyz
+            
+            # Apply bone length scaling to the custom shape scale (this is the key fix!)
+            effective_scale = Vector((
+                scale_xyz[0] * bone_length,
+                scale_xyz[1] * bone_length, 
+                scale_xyz[2] * bone_length
+            ))
+            
+            scale_matrix = Matrix.Diagonal((*effective_scale, 1.0))
+            
+            # 2. Create rotation matrix from custom_shape_rotation_euler
+            rotation_matrix = pose_bone.custom_shape_rotation_euler.to_matrix().to_4x4()
+            
+            # 3. Create translation matrix from custom_shape_translation
+            translation_matrix = Matrix.Translation(pose_bone.custom_shape_translation)
+            
+            # 4. Combine all transforms in the correct order
+            # Order: Translation * Rotation * Scale (applied right to left)
+            shape_local_matrix = translation_matrix @ rotation_matrix @ scale_matrix
+            
+            # 5. Apply to world space
+            final_matrix = armature_matrix @ bone_matrix @ shape_local_matrix
+            
+            # Transform all vertices and create edge lines
+            for edge in bm.edges:
+                v1_world = final_matrix @ edge.verts[0].co
+                v2_world = final_matrix @ edge.verts[1].co
+                lines.extend([v1_world, v2_world])
+            
+            bm.free()
+            
+        elif custom_shape.type == 'EMPTY':
+            # Handle empties used as custom shapes
+            # Get the empty's wireframe representation based on its display type
+            empty_lines = get_empty_wireframe_lines(custom_shape, bone, armature_obj, pose_bone)
+            lines.extend(empty_lines)
+    
+    except Exception as e:
+        print(f"Error generating custom shape wireframe for {bone.name}: {e}")
+    
+    return lines
+
+
+def get_empty_wireframe_lines(empty_obj, bone, armature_obj, pose_bone):
+    """Generate wireframe lines for empty objects used as custom shapes"""
+    lines = []
+    
+    try:
+        # Get armature object's world matrix
+        armature_matrix = armature_obj.matrix_world
+        
+        # Get the transform bone matrix (or pose bone matrix if no custom transform)
+        if pose_bone.custom_shape_transform:
+            transform_bone = armature_obj.pose.bones[pose_bone.custom_shape_transform.name]
+            bone_matrix = transform_bone.matrix
+        else:
+            bone_matrix = pose_bone.matrix
+        
+        # Create the custom shape transformation matrix
+        bone_length = bone.length if bone.length > 0 else 1.0
+        scale_xyz = pose_bone.custom_shape_scale_xyz
+        
+        # Apply bone length scaling
+        effective_scale = Vector((
+            scale_xyz[0] * bone_length,
+            scale_xyz[1] * bone_length, 
+            scale_xyz[2] * bone_length
+        ))
+        
+        scale_matrix = Matrix.Diagonal((*effective_scale, 1.0))
+        rotation_matrix = pose_bone.custom_shape_rotation_euler.to_matrix().to_4x4()
+        translation_matrix = Matrix.Translation(pose_bone.custom_shape_translation)
+        
+        shape_local_matrix = translation_matrix @ rotation_matrix @ scale_matrix
+        final_matrix = armature_matrix @ bone_matrix @ shape_local_matrix
+        
+        # Generate wireframe based on empty display type
+        empty_size = empty_obj.empty_display_size
+        
+        if empty_obj.empty_display_type == 'PLAIN_AXES':
+            # Three axes lines
+            axes_lines = [
+                Vector((0, 0, 0)), Vector((empty_size, 0, 0)),  # X axis
+                Vector((0, 0, 0)), Vector((0, empty_size, 0)),  # Y axis  
+                Vector((0, 0, 0)), Vector((0, 0, empty_size))   # Z axis
+            ]
+            
+        elif empty_obj.empty_display_type == 'ARROWS':
+            # Arrow wireframe
+            axes_lines = []
+            # X arrow
+            axes_lines.extend([Vector((0, 0, 0)), Vector((empty_size, 0, 0))])
+            axes_lines.extend([Vector((empty_size, 0, 0)), Vector((empty_size * 0.8, empty_size * 0.1, 0))])
+            axes_lines.extend([Vector((empty_size, 0, 0)), Vector((empty_size * 0.8, -empty_size * 0.1, 0))])
+            # Y arrow
+            axes_lines.extend([Vector((0, 0, 0)), Vector((0, empty_size, 0))])
+            axes_lines.extend([Vector((0, empty_size, 0)), Vector((empty_size * 0.1, empty_size * 0.8, 0))])
+            axes_lines.extend([Vector((0, empty_size, 0)), Vector((-empty_size * 0.1, empty_size * 0.8, 0))])
+            # Z arrow  
+            axes_lines.extend([Vector((0, 0, 0)), Vector((0, 0, empty_size))])
+            axes_lines.extend([Vector((0, 0, empty_size)), Vector((0, empty_size * 0.1, empty_size * 0.8))])
+            axes_lines.extend([Vector((0, 0, empty_size)), Vector((0, -empty_size * 0.1, empty_size * 0.8))])
+            
+        elif empty_obj.empty_display_type == 'SINGLE_ARROW':
+            # Single Z-axis arrow
+            axes_lines = [
+                Vector((0, 0, 0)), Vector((0, 0, empty_size)),
+                Vector((0, 0, empty_size)), Vector((empty_size * 0.1, 0, empty_size * 0.8)),
+                Vector((0, 0, empty_size)), Vector((-empty_size * 0.1, 0, empty_size * 0.8)),
+                Vector((0, 0, empty_size)), Vector((0, empty_size * 0.1, empty_size * 0.8)),
+                Vector((0, 0, empty_size)), Vector((0, -empty_size * 0.1, empty_size * 0.8))
+            ]
+            
+        elif empty_obj.empty_display_type == 'CIRCLE':
+            # Circle in XY plane
+            import math
+            axes_lines = []
+            segments = 16
+            for i in range(segments):
+                angle1 = (i / segments) * 2 * math.pi
+                angle2 = ((i + 1) / segments) * 2 * math.pi
+                v1 = Vector((math.cos(angle1) * empty_size, math.sin(angle1) * empty_size, 0))
+                v2 = Vector((math.cos(angle2) * empty_size, math.sin(angle2) * empty_size, 0))
+                axes_lines.extend([v1, v2])
+                
+        elif empty_obj.empty_display_type == 'CUBE':
+            # Cube wireframe
+            s = empty_size
+            vertices = [
+                Vector((-s, -s, -s)), Vector((s, -s, -s)), Vector((s, s, -s)), Vector((-s, s, -s)),
+                Vector((-s, -s, s)), Vector((s, -s, s)), Vector((s, s, s)), Vector((-s, s, s))
+            ]
+            # Cube edges
+            edges = [
+                (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
+                (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
+                (0, 4), (1, 5), (2, 6), (3, 7)   # Vertical edges
+            ]
+            axes_lines = []
+            for edge in edges:
+                axes_lines.extend([vertices[edge[0]], vertices[edge[1]]])
+                
+        elif empty_obj.empty_display_type == 'SPHERE':
+            # Sphere wireframe (3 circles)
+            import math
+            axes_lines = []
+            segments = 16
+            # XY circle
+            for i in range(segments):
+                angle1 = (i / segments) * 2 * math.pi
+                angle2 = ((i + 1) / segments) * 2 * math.pi
+                v1 = Vector((math.cos(angle1) * empty_size, math.sin(angle1) * empty_size, 0))
+                v2 = Vector((math.cos(angle2) * empty_size, math.sin(angle2) * empty_size, 0))
+                axes_lines.extend([v1, v2])
+            # XZ circle
+            for i in range(segments):
+                angle1 = (i / segments) * 2 * math.pi
+                angle2 = ((i + 1) / segments) * 2 * math.pi
+                v1 = Vector((math.cos(angle1) * empty_size, 0, math.sin(angle1) * empty_size))
+                v2 = Vector((math.cos(angle2) * empty_size, 0, math.sin(angle2) * empty_size))
+                axes_lines.extend([v1, v2])
+            # YZ circle
+            for i in range(segments):
+                angle1 = (i / segments) * 2 * math.pi
+                angle2 = ((i + 1) / segments) * 2 * math.pi
+                v1 = Vector((0, math.cos(angle1) * empty_size, math.sin(angle1) * empty_size))
+                v2 = Vector((0, math.cos(angle2) * empty_size, math.sin(angle2) * empty_size))
+                axes_lines.extend([v1, v2])
+        else:
+            # Default to plain axes for unknown types
+            axes_lines = [
+                Vector((0, 0, 0)), Vector((empty_size, 0, 0)),
+                Vector((0, 0, 0)), Vector((0, empty_size, 0)),
+                Vector((0, 0, 0)), Vector((0, 0, empty_size))
+            ]
+        
+        # Transform all points to world space
+        for i in range(0, len(axes_lines), 2):
+            v1_world = final_matrix @ axes_lines[i]
+            v2_world = final_matrix @ axes_lines[i + 1]
+            lines.extend([v1_world, v2_world])
+        
+    except Exception as e:
+        print(f"Error generating empty wireframe for {bone.name}: {e}")
+    
+    return lines
+
+
+def get_selected_bone_data():
+    """Get wireframe lines and colors for bones with custom shapes (selected or all based on enable_all)"""
+    context = bpy.context
+    
+    if not is_valid_context():
+        return {}
+    
+    armature_obj = context.active_object
+    armature_data = armature_obj.data
+    
+    bone_data = {}
+    
+    try:
+        # Get enable_all setting from scene properties
+        scene = context.scene
+        enable_all = scene.thick_bones_props.enable_all
+        
+        # Process bones with custom shapes (selected or all based on enable_all)
+        for bone in armature_data.bones:
+            should_process = enable_all or bone.select
+            
+            if should_process:
+                pose_bone = armature_obj.pose.bones[bone.name]
+                if pose_bone.custom_shape:
+                    # Check bone collection visibility
+                    if not is_bone_collection_visible(bone, armature_obj):
+                        continue
+                        
+                    bone_lines = get_custom_shape_wireframe_lines(bone, armature_obj)
+                    if bone_lines:
+                        bone_color = get_bone_color(bone, armature_obj)
+                        bone_data[bone.name] = {
+                            'lines': bone_lines,
+                            'color': bone_color
+                        }
+        
+        return bone_data
+        
+    except Exception as e:
+        print(f"Error getting bone data: {e}")
+        return {}
+
+
 def auto_update_check():
     """Timer function to check for selection changes and pose modifications"""
     global last_selection_hash, last_pose_hash, last_object_name, last_mode
@@ -138,7 +588,6 @@ def auto_update_check():
         
         # Check if context is still valid
         if not is_valid_context():
-            print("Invalid context detected, cleaning up")
             cleanup_thick_bones()
             tag_redraw_all()
             return None  # Stop timer
@@ -170,7 +619,6 @@ def auto_update_check():
             last_mode = current_mode
         
         if needs_update:
-            print("Changes detected, updating bone display")
             update_bone_display()
             tag_redraw_all()
         
@@ -200,8 +648,6 @@ def start_auto_update():
     """Start the auto-update timer"""
     global update_timer, last_selection_hash, last_pose_hash, last_object_name, last_mode
     
-    print("Starting auto-update timer")
-    
     # Stop existing timer if running
     stop_auto_update()
     
@@ -216,7 +662,6 @@ def start_auto_update():
         bpy.app.timers.unregister(auto_update_check)
     
     update_timer = bpy.app.timers.register(auto_update_check, first_interval=0.1)
-    print(f"Auto-update timer started: {update_timer}")
 
 
 def stop_auto_update():
@@ -227,139 +672,14 @@ def stop_auto_update():
         try:
             if bpy.app.timers.is_registered(auto_update_check):
                 bpy.app.timers.unregister(auto_update_check)
-                print("Auto-update timer stopped")
         except Exception as e:
             print(f"Error stopping timer: {e}")
         update_timer = None
 
 
-def get_bone_wireframe_lines(bone, armature_obj, thickness_multiplier=1.0):
-    """Generate wireframe lines for a bone based on its custom shape or default shape"""
-    lines = []
-    
-    try:
-        pose_bone = armature_obj.pose.bones[bone.name]
-        
-        # Get bone matrices
-        bone_matrix = armature_obj.matrix_world @ pose_bone.matrix
-        
-        if pose_bone.custom_shape:
-            # Use custom shape mesh
-            custom_shape = pose_bone.custom_shape
-            
-            # Create temporary bmesh from custom shape
-            bm = bmesh.new()
-            bm.from_mesh(custom_shape.data)
-            
-            # Apply custom shape transform if specified
-            if pose_bone.custom_shape_transform:
-                transform_bone = armature_obj.pose.bones[pose_bone.custom_shape_transform.name]
-                shape_matrix = armature_obj.matrix_world @ transform_bone.matrix
-            else:
-                shape_matrix = bone_matrix
-            
-            # Scale by bone custom shape scale
-            scale_matrix = Matrix.Scale(pose_bone.custom_shape_scale_xyz[0] * thickness_multiplier, 4, Vector((1, 0, 0))) @ \
-                          Matrix.Scale(pose_bone.custom_shape_scale_xyz[1] * thickness_multiplier, 4, Vector((0, 1, 0))) @ \
-                          Matrix.Scale(pose_bone.custom_shape_scale_xyz[2] * thickness_multiplier, 4, Vector((0, 0, 1)))
-            
-            final_matrix = shape_matrix @ scale_matrix
-            
-            # Get edges from custom shape
-            for edge in bm.edges:
-                v1 = final_matrix @ edge.verts[0].co
-                v2 = final_matrix @ edge.verts[1].co
-                lines.extend([v1, v2])
-            
-            bm.free()
-            
-        else:
-            # Generate default bone shape (stick/octahedral)
-            bone_length = bone.length
-            if bone_length == 0:
-                bone_length = 0.1
-            
-            # Create basic bone shape - stick with head and tail
-            head = bone_matrix @ Vector((0, 0, 0))
-            tail = bone_matrix @ Vector((0, bone_length, 0))
-            
-            # Add some width for visibility
-            width = bone_length * 0.1 * thickness_multiplier
-            
-            # Create octahedral shape around bone
-            up = bone_matrix @ Vector((0, 0, width)) - head
-            down = bone_matrix @ Vector((0, 0, -width)) - head
-            left = bone_matrix @ Vector((-width, 0, 0)) - head
-            right = bone_matrix @ Vector((width, 0, 0)) - head
-            
-            # Connect head to corners
-            lines.extend([head, head + up])
-            lines.extend([head, head + down])
-            lines.extend([head, head + left])
-            lines.extend([head, head + right])
-            
-            # Connect corners to tail
-            lines.extend([head + up, tail])
-            lines.extend([head + down, tail])
-            lines.extend([head + left, tail])
-            lines.extend([head + right, tail])
-            
-            # Connect corners to each other
-            lines.extend([head + up, head + right])
-            lines.extend([head + right, head + down])
-            lines.extend([head + down, head + left])
-            lines.extend([head + left, head + up])
-    
-    except Exception as e:
-        print(f"Error generating bone wireframe for {bone.name}: {e}")
-    
-    return lines
-
-
-def get_selected_bone_lines():
-    """Get wireframe lines for selected bones, separating active bone"""
-    context = bpy.context
-    
-    if not is_valid_context():
-        return [], []
-    
-    armature_obj = context.active_object
-    armature_data = armature_obj.data
-    
-    lines = []
-    active_lines = []
-    
-    try:
-        # Get thickness multiplier from scene properties
-        scene = context.scene
-        thickness_mult = scene.thick_bones_props.thickness_multiplier
-        active_thickness_mult = scene.thick_bones_props.active_thickness_multiplier
-        
-        # Get active bone
-        active_bone = armature_data.bones.active
-        
-        # Process selected bones
-        for bone in armature_data.bones:
-            if bone.select:
-                if active_bone and bone == active_bone:
-                    # This is the active bone
-                    bone_lines = get_bone_wireframe_lines(bone, armature_obj, active_thickness_mult)
-                    active_lines.extend(bone_lines)
-                else:
-                    # Regular selected bone
-                    bone_lines = get_bone_wireframe_lines(bone, armature_obj, thickness_mult)
-                    lines.extend(bone_lines)
-        
-        return lines, active_lines
-        
-    except Exception as e:
-        print(f"Error getting bone lines: {e}")
-        return [], []
-
-
 def draw_thick_bones():
-    """Draw thick lines for selected bones"""
-    global bone_batch, active_bone_batch, shader, is_drawing
+    """Draw thick lines for selected bones with custom shapes"""
+    global bone_batches, shader, is_drawing
     
     if not is_drawing or not is_valid_context():
         return
@@ -373,29 +693,21 @@ def draw_thick_bones():
         # Get settings from scene properties
         scene = bpy.context.scene
         thickness = scene.thick_bones_props.line_thickness
-        color = scene.thick_bones_props.color
-        active_color = scene.thick_bones_props.active_color
-        active_thickness = scene.thick_bones_props.active_line_thickness
         
         # Use cached shader
         shader = get_shader()
         
         # Enable line smooth and blend
         gpu.state.blend_set('ALPHA')
+        gpu.state.line_width_set(thickness)
         
-        # Draw regular selected bones
-        if bone_batch:
-            gpu.state.line_width_set(thickness)
-            shader.bind()
-            shader.uniform_float("color", (color[0], color[1], color[2], 1.0))
-            bone_batch.draw(shader)
-        
-        # Draw active bone with different color/thickness
-        if active_bone_batch:
-            gpu.state.line_width_set(active_thickness)
-            shader.bind()
-            shader.uniform_float("color", (active_color[0], active_color[1], active_color[2], 1.0))
-            active_bone_batch.draw(shader)
+        # Draw each bone batch with its color
+        for bone_name, batch_data in bone_batches.items():
+            if batch_data['batch']:
+                shader.bind()
+                color = batch_data['color']
+                shader.uniform_float("color", (color[0], color[1], color[2], 1.0))
+                batch_data['batch'].draw(shader)
         
         # Restore state
         gpu.state.line_width_set(1.0)
@@ -406,53 +718,76 @@ def draw_thick_bones():
 
 
 def update_bone_display():
-    """Update the bone batch with current selection"""
-    global bone_batch, active_bone_batch, shader, bone_lines, active_bone_lines
+    """Update the bone batches with current selection"""
+    global bone_batches, shader
     
     # Check if context is valid
     if not is_valid_context():
-        bone_batch = None
-        active_bone_batch = None
+        bone_batches = {}
         return
     
     try:
-        # Get current selected bone lines
-        bone_lines, active_bone_lines = get_selected_bone_lines()
+        # Get current selected bone data
+        bone_data = get_selected_bone_data()
         
         # Use cached shader
         shader = get_shader()
         
-        # Create batch for regular selected bones
-        if bone_lines:
-            bone_batch = batch_for_shader(
-                shader, 'LINES',
-                {"pos": bone_lines}
-            )
-        else:
-            bone_batch = None
+        # Clear old batches
+        bone_batches = {}
         
-        # Create batch for active bone
-        if active_bone_lines:
-            active_bone_batch = batch_for_shader(
-                shader, 'LINES',
-                {"pos": active_bone_lines}
-            )
-        else:
-            active_bone_batch = None
+        # Create batch for each bone
+        for bone_name, data in bone_data.items():
+            if data['lines']:
+                batch = batch_for_shader(
+                    shader, 'LINES',
+                    {"pos": data['lines']}
+                )
+                bone_batches[bone_name] = {
+                    'batch': batch,
+                    'color': data['color']
+                }
             
     except Exception as e:
         print(f"Error updating bone display: {e}")
-        bone_batch = None
-        active_bone_batch = None
+        bone_batches = {}
+
+
+def enable_thick_bones():
+    """Enable thick bones display"""
+    global draw_handler, is_drawing, auto_update_enabled
+    
+    if is_drawing:
+        return
+    
+    update_bone_display()
+    draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+        draw_thick_bones, (), 'WINDOW', 'POST_VIEW'
+    )
+    is_drawing = True
+    
+    # Set up auto-update using scene property
+    scene = bpy.context.scene
+    auto_update_enabled = scene.thick_bones_props.auto_update
+    if auto_update_enabled:
+        start_auto_update()
+    
+    tag_redraw_all()
 
 
 @persistent
 def mode_change_handler(scene, depsgraph):
-    """Handler for mode changes and object deletions"""
+    """FIXED: Handler for mode changes - auto-enable when entering pose mode"""
     global is_drawing
     
-    if is_drawing and not is_valid_context():
-        print("Mode change detected, cleaning up")
+    context = bpy.context
+    
+    # If we're entering pose mode and auto-enable is on, enable thick bones
+    if should_auto_enable() and not is_drawing:
+        enable_thick_bones()
+    
+    # If we're leaving pose mode or context is invalid, cleanup
+    elif is_drawing and not is_valid_context():
         cleanup_thick_bones()
         tag_redraw_all()
 
@@ -472,7 +807,7 @@ def selection_change_handler(scene, depsgraph):
 
 
 class POSE_OT_toggle_thick_bones(Operator):
-    """Toggle thick bone display for selected bones"""
+    """Toggle thick bone display for selected bones with custom shapes"""
     bl_idname = "pose.toggle_thick_bones"
     bl_label = "Toggle Thick Bones"
     bl_options = {'REGISTER'}
@@ -494,26 +829,18 @@ class POSE_OT_toggle_thick_bones(Operator):
             self.report({'INFO'}, "Thick bones disabled")
         else:
             # Enable thick bones
-            update_bone_display()
-            draw_handler = bpy.types.SpaceView3D.draw_handler_add(
-                draw_thick_bones, (), 'WINDOW', 'POST_VIEW'
-            )
-            is_drawing = True
+            enable_thick_bones()
             
-            # Set up auto-update using scene property
-            scene = context.scene
-            auto_update_enabled = scene.thick_bones_props.auto_update
-            if auto_update_enabled:
-                start_auto_update()
-            
-            total_bones = len(bone_lines)//2 + len(active_bone_lines)//2
+            total_bones = len(bone_batches)
             if total_bones > 0:
-                self.report({'INFO'}, f"Thick bones enabled for {total_bones} bone segments")
+                self.report({'INFO'}, f"Thick bones enabled for {total_bones} custom shapes")
             else:
-                self.report({'WARNING'}, "Thick bones enabled - select bones to see them")
+                scene = context.scene
+                if scene.thick_bones_props.enable_all:
+                    self.report({'WARNING'}, "Thick bones enabled - no custom shapes found on armature")
+                else:
+                    self.report({'WARNING'}, "Thick bones enabled - select bones with custom shapes to see them")
         
-        # Refresh viewport
-        tag_redraw_all()
         return {'FINISHED'}
 
 
@@ -538,11 +865,15 @@ class POSE_OT_update_thick_bones(Operator):
         # Update the bone display
         update_bone_display()
         
-        if bone_lines or active_bone_lines:
-            total_bones = len(bone_lines)//2 + len(active_bone_lines)//2
-            self.report({'INFO'}, f"Updated thick bones for {total_bones} bone segments")
+        total_bones = len(bone_batches)
+        if total_bones > 0:
+            self.report({'INFO'}, f"Updated thick bones for {total_bones} custom shapes")
         else:
-            self.report({'WARNING'}, "No bones selected")
+            scene = context.scene
+            if scene.thick_bones_props.enable_all:
+                self.report({'WARNING'}, "No custom shapes found on armature")
+            else:
+                self.report({'WARNING'}, "No bones with custom shapes selected")
         
         # Refresh viewport
         tag_redraw_all()
@@ -555,57 +886,27 @@ class ThickBonesProperties(bpy.types.PropertyGroup):
         default=3.0,
         min=1.0,
         max=20.0,
+        description="Thickness of the wireframe lines",
         update=lambda self, context: force_redraw_if_active()
-    )
-    
-    color: bpy.props.FloatVectorProperty(
-        name="Color",
-        subtype='COLOR',
-        default=(0.0, 0.8, 1.0),  # Light blue
-        min=0.0,
-        max=1.0,
-        update=lambda self, context: force_redraw_if_active()
-    )
-    
-    active_line_thickness: FloatProperty(
-        name="Active Line Thickness",
-        default=5.0,
-        min=1.0,
-        max=20.0,
-        update=lambda self, context: force_redraw_if_active()
-    )
-    
-    active_color: bpy.props.FloatVectorProperty(
-        name="Active Color",
-        subtype='COLOR',
-        default=(1.0, 0.8, 0.0),  # Yellow-orange
-        min=0.0,
-        max=1.0,
-        update=lambda self, context: force_redraw_if_active()
-    )
-    
-    thickness_multiplier: FloatProperty(
-        name="Shape Scale",
-        default=1.0,
-        min=0.1,
-        max=5.0,
-        description="Scale multiplier for bone shapes",
-        update=lambda self, context: force_update_if_active()
-    )
-    
-    active_thickness_multiplier: FloatProperty(
-        name="Active Shape Scale",
-        default=1.2,
-        min=0.1,
-        max=5.0,
-        description="Scale multiplier for active bone shape",
-        update=lambda self, context: force_update_if_active()
     )
     
     auto_update: BoolProperty(
         name="Auto Update",
         default=True,
         update=lambda self, context: update_auto_update_setting(self, context)
+    )
+    
+    auto_enable: BoolProperty(
+        name="Auto Enable",
+        default=False,
+        description="Automatically enable thick bones when entering pose mode"
+    )
+    
+    enable_all: BoolProperty(
+        name="Enable All",
+        default=False,
+        description="Display thick bones for all bones with custom shapes (not just selected ones)",
+        update=lambda self, context: force_update_if_active()
     )
 
 
@@ -629,7 +930,6 @@ def update_auto_update_setting(self, context):
     global auto_update_enabled, is_drawing
     
     auto_update_enabled = self.auto_update
-    print(f"Auto-update setting changed to: {auto_update_enabled}")
     
     if auto_update_enabled and is_drawing:
         start_auto_update()
@@ -638,12 +938,12 @@ def update_auto_update_setting(self, context):
 
 
 class VIEW3D_PT_thick_bones_overlay(Panel):
-    """Thick Bones Overlay Panel"""
+    """Thick Bones Overlay Panel in Armature section"""
     bl_label = "Thick Bones"
     bl_idname = "VIEW3D_PT_thick_bones_overlay"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
-    bl_parent_id = "VIEW3D_PT_overlay"
+    bl_parent_id = "VIEW3D_PT_overlay_bones"
     
     @classmethod
     def poll(cls, context):
@@ -651,68 +951,49 @@ class VIEW3D_PT_thick_bones_overlay(Panel):
                 context.active_object.type == 'ARMATURE' and
                 context.mode == 'POSE')
     
+    def draw_header(self, context):
+        layout = self.layout
+        layout.prop(context.scene.thick_bones_props, "auto_update", text="")
+    
     def draw(self, context):
         layout = self.layout
         scene = context.scene
         props = scene.thick_bones_props
         
-        # Main toggle button
-        col = layout.column(align=True)
-        row = col.row(align=True)
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         
-        # Toggle button with icon and text
+        # Main toggle
+        col = layout.column()
+        
         if is_drawing:
-            row.operator("pose.toggle_thick_bones", text="Thick Bones", icon='BONE_DATA', depress=True)
+            col.operator("pose.toggle_thick_bones", text="Disable Thick Bones", icon='BONE_DATA')
         else:
-            row.operator("pose.toggle_thick_bones", text="Thick Bones", icon='BONE_DATA')
+            col.operator("pose.toggle_thick_bones", text="Enable Thick Bones", icon='BONE_DATA')
         
-        # Auto-update toggle
-        row.prop(props, "auto_update", text="", icon='FILE_REFRESH')
+        # Enable All checkbox
+        col.separator()
+        col.prop(props, "enable_all")
         
-        # Settings section (only when enabled)
+        # Settings (only when enabled)
         if is_drawing:
-            # Selected bones section
-            col.separator(factor=0.5)
-            box = col.box()
-            box_col = box.column(align=True)
-            
-            # Header for selected bones
-            header_row = box_col.row(align=True)
-            header_row.label(text="Selected Bones", icon='BONE_DATA')
-            
-            # Properties
-            prop_row = box_col.row(align=True)
-            prop_row.prop(props, "line_thickness", text="Line")
-            prop_row.prop(props, "color", text="")
-            
-            shape_row = box_col.row(align=True)
-            shape_row.prop(props, "thickness_multiplier", text="Scale")
-            
-            # Active bone section
-            box_col.separator(factor=0.3)
-            active_row = box_col.row(align=True)
-            active_row.label(text="Active Bone", icon='ARMATURE_DATA')
-            
-            active_prop_row = box_col.row(align=True)
-            active_prop_row.prop(props, "active_line_thickness", text="Line")
-            active_prop_row.prop(props, "active_color", text="")
-            
-            active_shape_row = box_col.row(align=True)
-            active_shape_row.prop(props, "active_thickness_multiplier", text="Scale")
+            col.separator()
+            col.prop(props, "line_thickness")
             
             # Manual update button (only when auto-update is off)
             if not props.auto_update:
-                col.separator(factor=0.5)
-                update_row = col.row(align=True)
-                update_row.operator("pose.update_thick_bones", text="Update Selection", icon='FILE_REFRESH')
+                col.separator()
+                col.operator("pose.update_thick_bones", text="Update Selection", icon='FILE_REFRESH')
+        
+        # Auto-enable option (always visible)
+        col.separator()
+        col.prop(props, "auto_enable")
 
 
 # Clean up function
 def cleanup_thick_bones():
     """Clean up the drawing handler and auto-update timer"""
-    global draw_handler, is_drawing, bone_batch, active_bone_batch
-    
-    print("Cleaning up thick bones")
+    global draw_handler, is_drawing, bone_batches
     
     if draw_handler:
         try:
@@ -725,8 +1006,7 @@ def cleanup_thick_bones():
     stop_auto_update()
     
     # Clear batches
-    bone_batch = None
-    active_bone_batch = None
+    bone_batches = {}
     
     is_drawing = False
 
