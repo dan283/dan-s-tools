@@ -68,16 +68,19 @@ class OBJECT_OT_AssignCustomShape(bpy.types.Operator):
         direction = (tail - head).normalized()
         length = (tail - head).length
         
-        # Compute orientation matrix
-        up = Vector((0, 0, 1))
-        if abs(direction.dot(up)) > 0.999:
-            up = Vector((1, 0, 0))
+        # Create rotation matrix to align Y-axis with bone direction
+        # Use Blender's built-in matrix creation for reliable orientation
+        bone_vector = direction
         
-        x = direction.cross(up).normalized()
-        z = x.cross(direction).normalized()
-        y = direction
-        
-        rotation_matrix = Matrix((x, y, z)).transposed()
+        # Create a rotation matrix that aligns Y-axis to the bone direction
+        # This uses the 'track to' approach
+        if abs(bone_vector.z) < 0.999:
+            up_vector = Vector((0, 0, 1))
+        else:
+            up_vector = Vector((1, 0, 0))
+            
+        # Create transformation matrix
+        rotation_matrix = bone_vector.to_track_quat('Y', 'Z').to_matrix().to_4x4()
         
         # STEP 3: Transform the custom shape duplicate
         bpy.ops.object.mode_set(mode='OBJECT')
