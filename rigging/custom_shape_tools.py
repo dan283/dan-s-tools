@@ -20,6 +20,85 @@ class OBJECT_PT_CustomShapePanel(bpy.types.Panel):
         props = context.scene.custom_shape_props
         layout.prop(props, "custom_shape")
         layout.operator("object.assign_custom_shape", text="Assign Custom Shape")
+        layout.operator("object.match_bone_transforms", text="Match Bone Transforms")
+
+class OBJECT_OT_MatchBoneTransforms(bpy.types.Operator):
+    bl_idname = "object.match_bone_transforms"
+    bl_label = "Match Bone Transforms"
+    bl_description = "Transform the selected custom shape object to match the selected bone's transforms"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        props = context.scene.custom_shape_props
+        custom_shape = props.custom_shape
+        
+        # Check if we have a custom shape object selected
+        if not custom_shape:
+            self.report({'ERROR'}, "No custom shape object selected")
+            return {'CANCELLED'}
+        
+        # Check if we're in pose mode with an armature
+        if context.mode != 'POSE' or not context.object or context.object.type != 'ARMATURE':
+            self.report({'ERROR'}, "Must be in Pose Mode with an armature selected")
+            return {'CANCELLED'}
+        
+        # Get the active bone
+        active_bone = context.active_pose_bone
+        if not active_bone:
+            self.report({'ERROR'}, "No active bone selected")
+            return {'CANCELLED'}
+        
+        arm = context.object
+        
+        # Store original mode and selection
+        original_mode = context.mode
+        
+        # Get bone transforms in world space
+        bone_matrix_world = arm.matrix_world @ active_bone.matrix
+        
+        # Get bone info for scaling
+        head = active_bone.head
+        tail = active_bone.tail
+        bone_length = (tail - head).length
+        
+        # Switch to object mode to transform the custom shape
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        
+        # Select and make the custom shape active
+        custom_shape.select_set(True)
+        context.view_layer.objects.active = custom_shape
+        
+        # Get the custom shape's bounding box to calculate scaling
+        bbox = [Vector(v) for v in custom_shape.bound_box]
+        y_min = min(v.y for v in bbox)
+        y_max = max(v.y for v in bbox)
+        mesh_y_size = y_max - y_min if (y_max - y_min) != 0 else 1.0
+        
+        # Calculate scale factor to match bone length
+        scale_factor = bone_length / mesh_y_size
+        
+        # Apply the bone's transform to the custom shape
+        # First, reset the custom shape's transform
+        custom_shape.location = (0, 0, 0)
+        custom_shape.rotation_euler = (0, 0, 0)
+        custom_shape.scale = (1, 1, 1)
+        
+        # Apply the bone's world matrix
+        custom_shape.matrix_world = bone_matrix_world @ Matrix.Scale(scale_factor, 4)
+        
+        # Return to original mode and restore armature selection
+        bpy.ops.object.select_all(action='DESELECT')
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+        
+        if original_mode == 'POSE':
+            bpy.ops.object.mode_set(mode='POSE')
+            # Restore bone selection
+            active_bone.bone.select = True
+        
+        self.report({'INFO'}, f"Custom shape '{custom_shape.name}' transformed to match bone '{active_bone.name}'")
+        return {'FINISHED'}
 
 class OBJECT_OT_AssignCustomShape(bpy.types.Operator):
     bl_idname = "object.assign_custom_shape"
@@ -170,6 +249,7 @@ classes = (
     CustomShapeProperties,
     OBJECT_PT_CustomShapePanel,
     OBJECT_OT_AssignCustomShape,
+    OBJECT_OT_MatchBoneTransforms,
 )
 
 def register():
