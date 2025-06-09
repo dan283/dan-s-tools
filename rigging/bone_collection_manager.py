@@ -191,7 +191,7 @@ class VIEW3D_PT_rig_ui_panel(bpy.types.Panel):
             
             # Add spacing between rows only when tight packing is disabled
             if not context.scene.bone_ui_tight_packing and i > 0:
-                layout.separator()
+                layout.separator(factor=0.1)
             
             if len(collections_in_row) == 1:
                 # Single collection in row - full width button
