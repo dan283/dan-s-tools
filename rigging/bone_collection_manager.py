@@ -175,6 +175,9 @@ class VIEW3D_PT_rig_ui_panel(bpy.types.Panel):
             layout.label(text="No collections assigned to UI")
             return
         
+        # Add tight packing option
+        layout.prop(context.scene, "bone_ui_tight_packing", text="Tight Packing")
+        
         # Group collections by row
         rows = {}
         for item in assigned_collections:
@@ -183,8 +186,12 @@ class VIEW3D_PT_rig_ui_panel(bpy.types.Panel):
             rows[item.ui_row].append(item)
         
         # Draw collections organized by rows
-        for row_num in sorted(rows.keys()):
+        for i, row_num in enumerate(sorted(rows.keys())):
             collections_in_row = rows[row_num]
+            
+            # Add spacing between rows only when tight packing is disabled
+            if not context.scene.bone_ui_tight_packing and i > 0:
+                layout.separator()
             
             if len(collections_in_row) == 1:
                 # Single collection in row - full width button
@@ -204,7 +211,11 @@ class VIEW3D_PT_rig_ui_panel(bpy.types.Panel):
                     op.collection_name = collection_name
             else:
                 # Multiple collections in row - split layout
-                row_layout = layout.row()
+                if context.scene.bone_ui_tight_packing:
+                    row_layout = layout.row(align=True)
+                else:
+                    row_layout = layout.row()
+                    
                 for item in collections_in_row:
                     collection_name = item.collection_name
                     
@@ -239,6 +250,13 @@ def register():
     bpy.types.Scene.bone_collection_ui_data = bpy.props.CollectionProperty(
         type=BoneCollectionUIData
     )
+    
+    # Register tight packing option
+    bpy.types.Scene.bone_ui_tight_packing = bpy.props.BoolProperty(
+        name="Tight Packing",
+        description="Use tighter button spacing to fit more controls",
+        default=False
+    )
 
 def unregister():
     for cls in reversed(classes):
@@ -246,6 +264,9 @@ def unregister():
     
     # Unregister collection property
     del bpy.types.Scene.bone_collection_ui_data
+    
+    # Unregister tight packing option
+    del bpy.types.Scene.bone_ui_tight_packing
 
 if __name__ == "__main__":
     register()
