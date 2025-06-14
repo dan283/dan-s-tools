@@ -156,57 +156,131 @@ def get_bone_color(bone, armature_obj):
         active_bone = armature_data.bones.active
         is_active = active_bone and bone == active_bone
         
+        print(f"\n=== DEBUG: Getting color for bone '{bone.name}' ===")
+        print(f"Is active: {is_active}")
+        print(f"Is selected: {bone.select}")
+        
         # Check pose bone color first
-        if pose_bone and hasattr(pose_bone, 'color') and pose_bone.color.palette != 'DEFAULT':
-            if pose_bone.color.palette == 'CUSTOM':
-                # Use custom color
-                base_color = pose_bone.color.custom.normal[:3]
-                if is_active:
-                    return tuple(min(1.0, c * 1.3) for c in base_color)
+        if pose_bone:
+            print(f"Pose bone found: {pose_bone.name}")
+            
+            # Check if pose bone has color attribute
+            if hasattr(pose_bone, 'color'):
+                print(f"Pose bone has color attribute")
+                print(f"Color palette: {pose_bone.color.palette}")
+                
+                if pose_bone.color.palette != 'DEFAULT':
+                    print(f"Using pose bone color (non-default palette)")
+                    
+                    if pose_bone.color.palette == 'CUSTOM':
+                        print(f"Using custom color")
+                        # Use custom color
+                        base_color = pose_bone.color.custom.normal[:3]
+                        print(f"Custom color: {base_color}")
+                        if is_active:
+                            result_color = tuple(min(1.0, c * 1.3) for c in base_color)
+                            print(f"Active custom color: {result_color}")
+                            return result_color
+                        else:
+                            print(f"Normal custom color: {base_color}")
+                            return base_color
+                    else:
+                        print(f"Using theme color palette: {pose_bone.color.palette}")
+                        # Use theme color palette
+                        theme_color = get_bone_color_palette(pose_bone.color.palette, is_active)
+                        if theme_color:
+                            print(f"Theme color result: {theme_color}")
+                            return theme_color
                 else:
-                    return base_color
+                    print(f"Pose bone color is DEFAULT, checking armature bone color")
             else:
-                # Use theme color palette
-                theme_color = get_bone_color_palette(pose_bone.color.palette, is_active)
-                if theme_color:
-                    return theme_color
+                print(f"Pose bone has no color attribute")
+        else:
+            print(f"No pose bone found for {bone.name}")
         
         # Fallback to armature bone color
-        if hasattr(bone, 'color') and bone.color.palette != 'DEFAULT':
-            if bone.color.palette == 'CUSTOM':
-                # Use custom color
-                base_color = bone.color.custom.normal[:3]
-                if is_active:
-                    return tuple(min(1.0, c * 1.3) for c in base_color)
+        print(f"Checking armature bone color...")
+        if hasattr(bone, 'color'):
+            print(f"Armature bone has color attribute")
+            print(f"Armature bone color palette: {bone.color.palette}")
+            
+            if bone.color.palette != 'DEFAULT':
+                print(f"Using armature bone color (non-default palette)")
+                
+                if bone.color.palette == 'CUSTOM':
+                    print(f"Using armature bone custom color")
+                    # Use custom color
+                    base_color = bone.color.custom.normal[:3]
+                    print(f"Armature custom color: {base_color}")
+                    if is_active:
+                        result_color = tuple(min(1.0, c * 1.3) for c in base_color)
+                        print(f"Active armature custom color: {result_color}")
+                        return result_color
+                    else:
+                        print(f"Normal armature custom color: {base_color}")
+                        return base_color
                 else:
-                    return base_color
+                    print(f"Using armature theme color palette: {bone.color.palette}")
+                    # Use theme color palette
+                    theme_color = get_bone_color_palette(bone.color.palette, is_active)
+                    if theme_color:
+                        print(f"Armature theme color result: {theme_color}")
+                        return theme_color
             else:
-                # Use theme color palette
-                theme_color = get_bone_color_palette(bone.color.palette, is_active)
-                if theme_color:
-                    return theme_color
+                print(f"Armature bone color is DEFAULT")
+        else:
+            print(f"Armature bone has no color attribute")
+        
+        # Check bone collections for color (Blender 4.0+)
+        print(f"Checking bone collections...")
+        if hasattr(bone, 'collections') and bone.collections:
+            print(f"Bone has collections: {[col.name for col in bone.collections]}")
+            for collection in bone.collections:
+                if hasattr(collection, 'color_set') and collection.color_set != 'DEFAULT':
+                    print(f"Collection '{collection.name}' has color_set: {collection.color_set}")
+                    collection_color = get_collection_color_set(collection.color_set, is_active)
+                    if collection_color:
+                        print(f"Using collection color: {collection_color}")
+                        return collection_color
+                else:
+                    print(f"Collection '{collection.name}' has no color_set or is DEFAULT")
+        else:
+            print(f"Bone has no collections or collections is empty")
         
         # Final fallback: default theme colors based on bone state
+        print(f"Using final fallback - theme colors")
         theme = context.preferences.themes[0]
         
         if is_active:
-            return theme.view_3d.bone_pose_active[:3]  # Active bone color
+            result_color = theme.view_3d.bone_pose_active[:3]  # Active bone color
+            print(f"Theme active bone color: {result_color}")
+            return result_color
         elif bone.select:
-            return theme.view_3d.bone_pose[:3]  # Selected bone color
+            result_color = theme.view_3d.bone_pose[:3]  # Selected bone color
+            print(f"Theme selected bone color: {result_color}")
+            return result_color
         else:
-            return theme.view_3d.bone_solid[:3]  # Normal bone color
+            result_color = theme.view_3d.bone_solid[:3]  # Normal bone color
+            print(f"Theme normal bone color: {result_color}")
+            return result_color
             
     except Exception as e:
-        print(f"Error getting bone color for {bone.name}: {e}")
+        print(f"ERROR getting bone color for {bone.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        
         # Hard fallback to simple colors
         armature_data = armature_obj.data
         active_bone = armature_data.bones.active
         
         if active_bone and bone == active_bone:
+            print(f"Hard fallback: Yellow for active")
             return (1.0, 1.0, 0.0)  # Yellow for active
         elif bone.select:
+            print(f"Hard fallback: Light blue for selected")
             return (0.0, 0.8, 1.0)  # Light blue for selected
         else:
+            print(f"Hard fallback: Gray for normal")
             return (0.5, 0.5, 0.5)  # Gray for normal
 
 def get_collection_color_set(color_set, is_active=False):
@@ -244,22 +318,92 @@ def get_collection_color_set(color_set, is_active=False):
 
 
 def get_bone_color_palette(palette, is_active=False):
-    """Get color from bone color palette"""
+    """Get color from bone color palette - using Blender's actual theme colors"""
+    context = bpy.context
+    
+    try:
+        # Try to get the actual theme color from Blender's theme system
+        theme = context.preferences.themes[0]
+        
+        # Map theme palette names to Blender's internal theme colors
+        # These correspond to the bone color sets in Blender's themes
+        palette_map = {
+            'THEME01': 'bone_color_sets.01',
+            'THEME02': 'bone_color_sets.02', 
+            'THEME03': 'bone_color_sets.03',
+            'THEME04': 'bone_color_sets.04',
+            'THEME05': 'bone_color_sets.05',
+            'THEME06': 'bone_color_sets.06',
+            'THEME07': 'bone_color_sets.07',
+            'THEME08': 'bone_color_sets.08',
+            'THEME09': 'bone_color_sets.09',
+            'THEME10': 'bone_color_sets.10',
+            'THEME11': 'bone_color_sets.11',
+            'THEME12': 'bone_color_sets.12',
+            'THEME13': 'bone_color_sets.13',
+            'THEME14': 'bone_color_sets.14',
+            'THEME15': 'bone_color_sets.15',
+            'THEME16': 'bone_color_sets.16',
+            'THEME17': 'bone_color_sets.17',
+            'THEME18': 'bone_color_sets.18',
+            'THEME19': 'bone_color_sets.19',
+            'THEME20': 'bone_color_sets.20',
+        }
+        
+        # Try to get the actual theme color
+        if palette in palette_map:
+            try:
+                color_set_path = palette_map[palette]
+                # Navigate to the color set in the theme
+                color_set = theme.view_3d
+                for attr in color_set_path.split('.'):
+                    color_set = getattr(color_set, attr)
+                
+                # Get the appropriate color based on bone state
+                if is_active:
+                    if hasattr(color_set, 'active'):
+                        color = color_set.active[:3]
+                        print(f"DEBUG: Using theme active color for {palette}: {color}")
+                        return color
+                    elif hasattr(color_set, 'normal'):
+                        # Brighten normal color for active state
+                        base_color = color_set.normal[:3]
+                        color = tuple(min(1.0, c * 1.3) for c in base_color)
+                        print(f"DEBUG: Using brightened theme color for {palette}: {color}")
+                        return color
+                else:
+                    if hasattr(color_set, 'normal'):
+                        color = color_set.normal[:3]
+                        print(f"DEBUG: Using theme normal color for {palette}: {color}")
+                        return color
+                    elif hasattr(color_set, 'select'):
+                        color = color_set.select[:3]
+                        print(f"DEBUG: Using theme select color for {palette}: {color}")
+                        return color
+                        
+            except AttributeError as e:
+                print(f"DEBUG: Could not access theme color for {palette}: {e}")
+                pass  # Fall back to hardcoded colors
+        
+    except Exception as e:
+        print(f"DEBUG: Error accessing theme for palette {palette}: {e}")
+    
+    # Fallback to hardcoded colors that better match Blender's defaults
     palette_colors = {
-        'THEME01': (1.0, 0.0, 0.0),    # Red
-        'THEME02': (0.0, 1.0, 0.0),    # Green
-        'THEME03': (0.0, 0.0, 1.0),    # Blue
-        'THEME04': (1.0, 1.0, 0.0),    # Yellow
-        'THEME05': (1.0, 0.0, 1.0),    # Magenta
-        'THEME06': (0.0, 1.0, 1.0),    # Cyan
-        'THEME07': (1.0, 0.5, 0.0),    # Orange
-        'THEME08': (0.5, 0.0, 1.0),    # Purple
-        'THEME09': (0.5, 1.0, 0.0),    # Light Green
-        'THEME10': (1.0, 0.0, 0.5),    # Pink
-        'THEME11': (0.0, 0.5, 1.0),    # Light Blue
-        'THEME12': (0.5, 0.5, 0.5),    # Gray
+        'THEME01': (0.8, 0.2, 0.2),    # Red
+        'THEME02': (0.2, 0.8, 0.2),    # Green  
+        'THEME03': (0.2, 0.2, 0.8),    # Blue
+        'THEME04': (0.2, 0.2, 0.8),    # Yellow
+        'THEME05': (0.8, 0.2, 0.8),    # Magenta
+        'THEME06': (0.2, 0.8, 0.8),    # Cyan
+        'THEME07': (0.8, 0.5, 0.2),    # Orange
+        'THEME08': (0.5, 0.2, 0.8),    # Purple
+        'THEME09': (0.8, 0.8, 0.2),    # Light Green (was 0.5, 1.0, 0.0)
+        'THEME10': (0.8, 0.2, 0.5),    # Pink
+        'THEME11': (0.2, 0.5, 0.8),    # Light Blue
+        'THEME12': (0.6, 0.6, 0.6),    # Gray (was 0.5, 0.5, 0.5)
         'THEME13': (0.8, 0.8, 0.8),    # Light Gray
-        'THEME14': (0.2, 0.2, 0.2),    # Dark Gray
+        'THEME14': (0.3, 0.3, 0.3),    # Dark Gray
         'THEME15': (0.8, 0.4, 0.2),    # Brown
         'THEME16': (0.4, 0.8, 0.2),    # Lime
         'THEME17': (0.2, 0.4, 0.8),    # Navy
@@ -269,10 +413,13 @@ def get_bone_color_palette(palette, is_active=False):
     }
     
     color = palette_colors.get(palette, (0.5, 0.5, 0.5))
+    print(f"DEBUG: Using hardcoded color for {palette}: {color}")
     
     if is_active:
         # Brighten active bone
-        return tuple(min(1.0, c * 1.3) for c in color)
+        result = tuple(min(1.0, c * 1.3) for c in color)
+        print(f"DEBUG: Brightened active color: {result}")
+        return result
     
     return color
 
