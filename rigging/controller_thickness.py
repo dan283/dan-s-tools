@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Thick Bones Overlay",
     "author": "Your Name", 
-    "version": (1, 0, 7),
+    "version": (1, 0, 8),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Overlays > Armature (Pose Mode)",
     "description": "Display selected bones with customizable thickness overlay for custom shapes in pose mode",
@@ -52,6 +52,16 @@ def is_valid_context():
         return False
     
     return True
+
+
+def should_display_in_front():
+    """Check if armature should display in front"""
+    context = bpy.context
+    if not context.active_object:
+        return False
+    
+    armature_obj = context.active_object
+    return armature_obj.show_in_front
 
 
 def get_bone_color(bone, armature_obj):
@@ -487,12 +497,6 @@ def draw_thick_bones():
             # Clear any cached batches when transforms change
             bone_batches.clear()
         
-        # Clear and reset GPU state to prevent artifacts
-        gpu.state.blend_set('NONE')
-        gpu.state.line_width_set(1.0)
-        gpu.state.depth_test_set('LESS_EQUAL')
-        gpu.state.depth_mask_set(True)
-        
         scene = bpy.context.scene
         thickness = scene.thick_bones_props.line_thickness
         
@@ -504,9 +508,20 @@ def draw_thick_bones():
         
         shader = get_shader()
         
-        # Set up drawing state with proper blending
+        # Determine depth testing based on armature display settings
+        display_in_front = should_display_in_front()
+        
+        # Set up drawing state
+        if display_in_front:
+            # Disable depth testing to draw in front of everything
+            gpu.state.depth_test_set('NONE')
+        else:
+            # Use normal depth testing
+            gpu.state.depth_test_set('LESS_EQUAL')
+        
         gpu.state.blend_set('ALPHA')
         gpu.state.line_width_set(thickness)
+        gpu.state.depth_mask_set(True)
         
         # Create and draw batches on the fly for maximum responsiveness
         for bone_name, data in bone_data.items():
