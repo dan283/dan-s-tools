@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Thick Bones Overlay",
     "author": "Your Name", 
-    "version": (1, 0, 8),
+    "version": (1, 0, 9),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Overlays > Armature (Pose Mode)",
     "description": "Display selected bones with customizable thickness overlay for custom shapes in pose mode",
@@ -28,6 +28,7 @@ is_drawing = False
 _cached_shader = None
 _last_selection_state = None
 _last_transform_state = None
+_last_overlay_state = None
 
 
 def get_shader():
@@ -62,6 +63,16 @@ def should_display_in_front():
     
     armature_obj = context.active_object
     return armature_obj.show_in_front
+
+
+def are_overlays_enabled():
+    """Check if overlays are enabled in any 3D viewport"""
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            space_data = area.spaces.active
+            if space_data and space_data.overlay.show_overlays:
+                return True
+    return False
 
 
 def get_bone_color(bone, armature_obj):
@@ -474,14 +485,25 @@ def tag_redraw_all():
 
 def draw_thick_bones():
     """Draw thick lines for selected bones with custom shapes - updates every frame"""
-    global bone_batches, shader, is_drawing, _last_transform_state
+    global bone_batches, shader, is_drawing, _last_transform_state, _last_overlay_state
     
     if not is_drawing or not is_valid_context():
         return
     
-    # Check if overlays are enabled
-    space_data = get_3d_view_space()
-    if space_data and not space_data.overlay.show_overlays:
+    # Check if overlays are enabled - if not, clear the overlay and return
+    current_overlay_state = are_overlays_enabled()
+    overlay_changed = current_overlay_state != _last_overlay_state
+    
+    if overlay_changed:
+        _last_overlay_state = current_overlay_state
+        if not current_overlay_state:
+            # Clear any cached batches when overlays are disabled
+            bone_batches.clear()
+            # Force a redraw to clear the overlay
+            tag_redraw_all()
+    
+    # Don't draw if overlays are disabled
+    if not current_overlay_state:
         return
     
     try:
@@ -554,7 +576,7 @@ def draw_thick_bones():
 
 def enable_thick_bones():
     """Enable thick bones display"""
-    global draw_handler, is_drawing
+    global draw_handler, is_drawing, _last_overlay_state
     
     if is_drawing:
         return
@@ -563,6 +585,7 @@ def enable_thick_bones():
         draw_thick_bones, (), 'WINDOW', 'POST_VIEW'
     )
     is_drawing = True
+    _last_overlay_state = are_overlays_enabled()
     
     # Force immediate redraw to clear any residual state
     tag_redraw_all()
@@ -582,7 +605,7 @@ def update_overlay_timer():
 
 def cleanup_thick_bones():
     """Clean up the drawing handler"""
-    global draw_handler, is_drawing, bone_batches, _last_selection_state, _last_transform_state
+    global draw_handler, is_drawing, bone_batches, _last_selection_state, _last_transform_state, _last_overlay_state
     
     # Stop the update timer
     if bpy.app.timers.is_registered(update_overlay_timer):
@@ -598,6 +621,7 @@ def cleanup_thick_bones():
     bone_batches = {}
     _last_selection_state = None
     _last_transform_state = None
+    _last_overlay_state = None
     is_drawing = False
     
     # Force final redraw to clear any remaining overlay
