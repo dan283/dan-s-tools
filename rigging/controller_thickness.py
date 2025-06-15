@@ -169,21 +169,21 @@ def get_collection_color_set(color_set, is_active=False):
 def get_bone_color_palette(palette, is_active=False):
     """Get color from bone color palette"""
     palette_colors = {
-        'THEME01': (1.0, 0.0, 0.0),          # Red
-        'THEME02': (1.0, 0.251, 0.0),        # Orange  
-        'THEME03': (0.0, 0.753, 0.0),        # Green
+        'THEME01': (0.957, 0.043, 0.059),    # Red
+        'THEME02': (0.949, 0.431, 0.008),    # Orange  
+        'THEME03': (0.345, 0.710, 0.047),    # Green
         'THEME04': (0.0, 0.502, 1.0),        # Blue
-        'THEME05': (0.502, 0.0, 1.0),        # Purple
+        'THEME05': (0.776, 0.247, 0.408),    # Purple
         'THEME06': (1.0, 0.0, 0.753),        # Pink/Magenta
         'THEME07': (0.0, 0.753, 0.753),      # Teal/Cyan
-        'THEME08': (0.251, 0.251, 0.251),    # Dark Gray
-        'THEME09': (1.0, 0.753, 0.0),        # Yellow
-        'THEME10': (1.0, 1.0, 1.0),          # White
-        'THEME11': (1.0, 0.0, 1.0),          # Magenta
-        'THEME12': (0.753, 1.0, 0.502),      # Light Yellow-Green
-        'THEME13': (0.502, 1.0, 0.502),      # Pale Green
-        'THEME14': (1.0, 0.502, 0.251),      # Orange
-        'THEME15': (0.0, 0.502, 0.0),        # Forest Green
+        'THEME08': (0.424, 0.525, 0.584),    # Dark Gray
+        'THEME09': (0.914, 0.765, 0.196),    # Yellow
+        'THEME10': (0.286, 0.298, 0.325),    # White
+        'THEME11': (0.612, 0.255, 0.753),    # Magenta
+        'THEME12': (0.486, 0.694, 0.137),    # Light Yellow-Green
+        'THEME13': (0.659, 0.694, 0.675),    # Pale Green
+        'THEME14': (0.541, 0.341, 0.086),    # Orange
+        'THEME15': (0.110, 0.263, 0.039),    # Forest Green
         'THEME16': (0.0, 0.0, 0.0),          # Black
         'THEME17': (0.0, 0.0, 0.0),          # Black
         'THEME18': (0.0, 0.0, 0.0),          # Black
