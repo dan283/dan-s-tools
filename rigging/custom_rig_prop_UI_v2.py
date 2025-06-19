@@ -39,6 +39,13 @@ class CustomPropUIItem(PropertyGroup):
         default=0,
         min=0
     )
+    panel_order: IntProperty(
+        name="Panel Order",
+        description="Order of the panel (for sorting subpanels)",
+        default=0,
+        min=0,
+        update=lambda self, context: update_subpanels_delayed(context)
+    )
     in_box: BoolProperty(
         name="In Box",
         description="Draw this property inside a box",
@@ -113,6 +120,11 @@ class CUSTOMPROP_PT_settings(bpy.types.Panel):
         row.operator("customprop.add_property", text="Add", icon='ADD')
         row.operator("customprop.remove_property", text="Remove", icon='REMOVE')
         
+        # Sorting buttons
+        row = col.row(align=True)
+        row.operator("customprop.move_property_up", text="Move Up", icon='TRIA_UP')
+        row.operator("customprop.move_property_down", text="Move Down", icon='TRIA_DOWN')
+        
         # Property details for selected item
         if (armature.customprop_active_item_index >= 0 and 
             armature.customprop_active_item_index < len(armature.customprop_ui_items)):
@@ -123,6 +135,7 @@ class CUSTOMPROP_PT_settings(bpy.types.Panel):
             box = col.box()
             box.label(text="Property Settings:")
             box.prop(item, "ui_row")
+            box.prop(item, "panel_order")
             box.prop(item, "in_box")
 
 # Main custom properties panel
@@ -270,11 +283,11 @@ def create_subpanel_class(panel_name, class_name):
                 # Determine display name
                 display_name = item.display_name if item.display_name else item.prop_name
                 
-                # Choose layout based on box setting
+                # Choose layout based on box setting - use layout for subpanel
                 if item.in_box and current_box is not None:
                     prop_layout = current_box
                 else:
-                    prop_layout = layout
+                    prop_layout = layout  # This is the subpanel's layout
                 
                 # Draw the property
                 prop_layout.prop(bone, f'["{item.prop_name}"]', 
@@ -310,11 +323,19 @@ def update_subpanels(context=None):
     if not hasattr(armature, 'customprop_ui_items'):
         return
     
-    # Get unique panel names (excluding "Main")
-    current_panel_names = set()
+    # Get unique panel names (excluding "Main") and sort by panel_order
+    panel_data = {}
     for item in armature.customprop_ui_items:
         if item.show_in_ui and item.panel_name != "Main" and item.panel_name.strip():
-            current_panel_names.add(item.panel_name)
+            if item.panel_name not in panel_data:
+                panel_data[item.panel_name] = item.panel_order
+            else:
+                # Use the minimum panel_order for this panel name
+                panel_data[item.panel_name] = min(panel_data[item.panel_name], item.panel_order)
+    
+    # Sort panel names by their order
+    sorted_panel_names = sorted(panel_data.keys(), key=lambda name: panel_data[name])
+    current_panel_names = set(sorted_panel_names)
     
     # Get currently required class names
     required_classes = {get_panel_class_name(name): name for name in current_panel_names}
@@ -334,21 +355,25 @@ def update_subpanels(context=None):
     for class_name in to_unregister:
         del _subpanel_registry[class_name]
     
-    # Register new panels
-    for class_name, panel_name in required_classes.items():
+    # Register new panels in order
+    for i, panel_name in enumerate(sorted_panel_names):
+        class_name = get_panel_class_name(panel_name)
         if class_name not in _subpanel_registry:
             panel_class = create_subpanel_class(panel_name, class_name)
+            # Set panel order for proper sorting
+            panel_class.bl_order = i
             try:
                 bpy.utils.register_class(panel_class)
-                print(f"Registered subpanel: {class_name} for '{panel_name}'")
+                print(f"Registered subpanel: {class_name} for '{panel_name}' (order: {i})")
             except Exception as e:
                 print(f"Failed to register subpanel {class_name}: {e}")
         elif class_name not in [cls.bl_idname for cls in bpy.types.Panel.__subclasses__() if hasattr(cls, 'bl_idname')]:
             # Panel exists in registry but not in Blender - re-register
             panel_class = _subpanel_registry[class_name]
+            panel_class.bl_order = i
             try:
                 bpy.utils.register_class(panel_class)
-                print(f"Re-registered subpanel: {class_name} for '{panel_name}'")
+                print(f"Re-registered subpanel: {class_name} for '{panel_name}' (order: {i})")
             except Exception as e:
                 print(f"Failed to re-register subpanel {class_name}: {e}")
     
@@ -397,6 +422,40 @@ class CUSTOMPROP_OT_scan_properties(bpy.types.Operator):
         update_subpanels(context)
         
         self.report({'INFO'}, f"Found {len(found_props)} new custom properties")
+        return {'FINISHED'}
+
+class CUSTOMPROP_OT_move_property_up(bpy.types.Operator):
+    bl_idname = "customprop.move_property_up"
+    bl_label = "Move Property Up"
+    bl_description = "Move the selected property up in the list"
+    
+    def execute(self, context):
+        obj = context.active_object
+        armature = obj.data
+        index = armature.customprop_active_item_index
+        
+        if index > 0:
+            # Swap items
+            armature.customprop_ui_items.move(index, index - 1)
+            armature.customprop_active_item_index = index - 1
+        
+        return {'FINISHED'}
+
+class CUSTOMPROP_OT_move_property_down(bpy.types.Operator):
+    bl_idname = "customprop.move_property_down"
+    bl_label = "Move Property Down"
+    bl_description = "Move the selected property down in the list"
+    
+    def execute(self, context):
+        obj = context.active_object
+        armature = obj.data
+        index = armature.customprop_active_item_index
+        
+        if index < len(armature.customprop_ui_items) - 1:
+            # Swap items
+            armature.customprop_ui_items.move(index, index + 1)
+            armature.customprop_active_item_index = index + 1
+        
         return {'FINISHED'}
 
 class CUSTOMPROP_OT_refresh_panels(bpy.types.Operator):
@@ -459,6 +518,8 @@ classes = [
     CUSTOMPROP_OT_refresh_panels,
     CUSTOMPROP_OT_add_property,
     CUSTOMPROP_OT_remove_property,
+    CUSTOMPROP_OT_move_property_up,
+    CUSTOMPROP_OT_move_property_down,
 ]
 
 def register():
