@@ -125,6 +125,7 @@ def store_original_materials(render_set):
 
 def apply_material_override(render_set):
     """Apply material override to objects in enabled collections"""
+    # Only apply if the specific render set has material override enabled
     if not render_set.use_material_override or render_set.override_material == 'NONE':
         return
     
@@ -148,6 +149,16 @@ def apply_material_override(render_set):
                     for slot in obj.material_slots:
                         if slot.material:
                             slot.material = override_mat
+
+def restore_all_materials():
+    """Restore all materials in the scene to their original state"""
+    # This function ensures we clean up any material overrides before applying new ones
+    for obj in bpy.data.objects:
+        if obj.type == 'MESH' and hasattr(obj, 'original_materials'):
+            # If we had stored original materials, restore them
+            for slot_idx, slot in enumerate(obj.material_slots):
+                if hasattr(slot, 'original_material') and slot.original_material:
+                    slot.material = slot.original_material
 
 def restore_original_materials(render_set):
     """Restore original materials from stored data"""
@@ -216,6 +227,9 @@ class RENDERVARIATIONS_OT_apply_set(Operator):
         
         active_set = props.render_sets[props.active_set_index]
         
+        # First restore all materials to clean state
+        restore_all_materials()
+        
         # Apply collection visibility
         for coll_item in active_set.collections:
             if coll_item.name in bpy.data.collections:
@@ -223,10 +237,11 @@ class RENDERVARIATIONS_OT_apply_set(Operator):
                 collection.hide_viewport = not coll_item.enabled
                 collection.hide_render = not coll_item.enabled
         
-        # Apply camera settings
+        # Apply camera settings - FIXED: Check use_custom_camera properly
         if active_set.use_custom_camera and active_set.camera != 'NONE':
             if active_set.camera in bpy.data.objects:
                 context.scene.camera = bpy.data.objects[active_set.camera]
+                print(f"Set camera to: {active_set.camera}")
         
         # Apply resolution settings
         if active_set.use_custom_resolution:
@@ -236,10 +251,11 @@ class RENDERVARIATIONS_OT_apply_set(Operator):
         # Apply render settings if using custom output
         if active_set.use_custom_output:
             if active_set.output_path:
-                context.scene.render.filepath = os.path.join(
+                filepath = os.path.join(
                     bpy.path.abspath(active_set.output_path),
                     active_set.file_prefix
                 )
+                context.scene.render.filepath = filepath
             
             # Apply resolution scale
             context.scene.render.resolution_percentage = active_set.resolution_scale
@@ -248,8 +264,9 @@ class RENDERVARIATIONS_OT_apply_set(Operator):
             if active_set.use_samples_override and hasattr(context.scene, 'cycles'):
                 context.scene.cycles.samples = active_set.samples
         
-        # Apply material override
-        apply_material_override(active_set)
+        # Apply material override ONLY if this specific set has it enabled
+        if active_set.use_material_override:
+            apply_material_override(active_set)
         
         self.report({'INFO'}, f"Applied render set: {active_set.name}")
         return {'FINISHED'}
@@ -298,38 +315,106 @@ class RENDERVARIATIONS_OT_batch_render(Operator):
     def execute(self, context):
         props = context.scene.render_variations
         original_index = props.active_set_index
+        original_filepath = context.scene.render.filepath
+        original_camera = context.scene.camera
         
         for i, render_set in enumerate(props.render_sets):
             props.active_set_index = i
+            
+            # Restore all materials to clean state before applying each set
+            restore_all_materials()
+            
+            # Apply the render set (this will handle camera, materials, etc.)
             bpy.ops.render_variations.apply_set()
             
-            # Store original filepath
-            original_filepath = context.scene.render.filepath
-            
-            # Set custom filename with set name
+            # Set custom filename with set name and file prefix
             if render_set.use_custom_output and render_set.output_path:
-                filename = f"{render_set.file_prefix}_{render_set.name}_f{context.scene.frame_current:04d}"
+                # Use custom output path with prefix
+                if render_set.file_prefix:
+                    filename = f"{render_set.file_prefix}_{render_set.name}_f{context.scene.frame_current:04d}"
+                else:
+                    filename = f"{render_set.name}_f{context.scene.frame_current:04d}"
                 context.scene.render.filepath = os.path.join(
                     bpy.path.abspath(render_set.output_path), filename
                 )
             else:
-                # Use default path with set name
-                base_path = os.path.dirname(context.scene.render.filepath)
-                filename = f"{render_set.name}_f{context.scene.frame_current:04d}"
+                # Use default path with set name and prefix
+                base_path = os.path.dirname(original_filepath)
+                if render_set.file_prefix:
+                    filename = f"{render_set.file_prefix}_{render_set.name}_f{context.scene.frame_current:04d}"
+                else:
+                    filename = f"{render_set.name}_f{context.scene.frame_current:04d}"
                 context.scene.render.filepath = os.path.join(base_path, filename)
             
             # Render
             bpy.ops.render.render(write_still=True)
             
-            # Restore materials after render
-            restore_original_materials(render_set)
-            
-            # Restore filepath
-            context.scene.render.filepath = original_filepath
+            # Restore materials after render (only if this set used material override)
+            if render_set.use_material_override:
+                restore_original_materials(render_set)
         
-        # Restore original active set
+        # Restore original settings
         props.active_set_index = original_index
+        context.scene.render.filepath = original_filepath
+        context.scene.camera = original_camera
+        restore_all_materials()
+        
         self.report({'INFO'}, f"Batch rendered {len(props.render_sets)} sets")
+        return {'FINISHED'}
+
+class RENDERVARIATIONS_OT_batch_render_animation(Operator):
+    bl_idname = "render_variations.batch_render_animation"
+    bl_label = "Batch Render Animation All Sets"
+    bl_description = "Render animation with all render sets"
+    
+    def execute(self, context):
+        props = context.scene.render_variations
+        original_index = props.active_set_index
+        original_filepath = context.scene.render.filepath
+        original_camera = context.scene.camera
+        
+        for i, render_set in enumerate(props.render_sets):
+            props.active_set_index = i
+            
+            # Restore all materials to clean state before applying each set
+            restore_all_materials()
+            
+            # Apply the render set (this will handle camera, materials, etc.)
+            bpy.ops.render_variations.apply_set()
+            
+            # Set custom filename with set name and file prefix
+            if render_set.use_custom_output and render_set.output_path:
+                # Use custom output path with prefix
+                if render_set.file_prefix:
+                    filename = f"{render_set.file_prefix}_{render_set.name}_"
+                else:
+                    filename = f"{render_set.name}_"
+                context.scene.render.filepath = os.path.join(
+                    bpy.path.abspath(render_set.output_path), filename
+                )
+            else:
+                # Use default path with set name and prefix
+                base_path = os.path.dirname(original_filepath)
+                if render_set.file_prefix:
+                    filename = f"{render_set.file_prefix}_{render_set.name}_"
+                else:
+                    filename = f"{render_set.name}_"
+                context.scene.render.filepath = os.path.join(base_path, filename)
+            
+            # Render animation
+            bpy.ops.render.render(animation=True)
+            
+            # Restore materials after render (only if this set used material override)
+            if render_set.use_material_override:
+                restore_original_materials(render_set)
+        
+        # Restore original settings
+        props.active_set_index = original_index
+        context.scene.render.filepath = original_filepath
+        context.scene.camera = original_camera
+        restore_all_materials()
+        
+        self.report({'INFO'}, f"Batch rendered animation for {len(props.render_sets)} sets")
         return {'FINISHED'}
 
 class RENDERVARIATIONS_OT_refresh_collections(Operator):
@@ -518,7 +603,9 @@ class RENDERVARIATIONS_PT_sets(Panel):
             row.operator("render_variations.store_current_state", icon='FILE_CACHE', text="Store")
             
             # Batch Render
-            layout.operator("render_variations.batch_render", icon='RENDER_RESULT')
+            col = layout.column(align=True)
+            col.operator("render_variations.batch_render", icon='RENDER_RESULT')
+            col.operator("render_variations.batch_render_animation", icon='RENDER_ANIMATION', text="Batch Render Animation")
 
 class RENDERVARIATIONS_PT_collections(Panel):
     bl_label = "Collections"
@@ -569,6 +656,7 @@ classes = (
     RENDERVARIATIONS_OT_render_frame,
     RENDERVARIATIONS_OT_render_animation,
     RENDERVARIATIONS_OT_batch_render,
+    RENDERVARIATIONS_OT_batch_render_animation,
     RENDERVARIATIONS_OT_refresh_collections,
     RENDERVARIATIONS_OT_store_current_state,
     RENDERVARIATIONS_OT_duplicate_set,
