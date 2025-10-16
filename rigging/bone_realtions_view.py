@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Bone Hierarchy Analyzer",
     "author": "Assistant",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (3, 0, 0),
     "location": "View3D > N-Panel > Bone Analyzer",
     "description": "Visualize bone hierarchies, relationships, and constraints",
@@ -24,6 +24,9 @@ _viz_data = {
     'hierarchy_lines': [],
     'constraint_lines': [],
     'is_active': False,
+    'hidden_objects': [],
+    'armature_name': None,
+    'original_bone_overlay_state': None,
 }
 
 _draw_handler = None
@@ -114,14 +117,78 @@ def store_original_transforms(selected_bones):
     _viz_data['original_matrices'].clear()
     
     for bone in selected_bones:
-        _viz_data['original_matrices'][bone.name] = bone.matrix.copy()
+        # Store the local matrix, not world matrix
+        _viz_data['original_matrices'][bone.name] = {
+            'matrix': bone.matrix.copy(),
+            'matrix_basis': bone.matrix_basis.copy(),
+        }
 
 
 def apply_bone_layout(armature, positions):
     """Apply calculated positions to bones"""
     for bone, pos in positions.items():
-        # Set bone to new position
-        bone.matrix = Matrix.Translation(pos)
+        # Clear all transforms first
+        bone.location = (0, 0, 0)
+        bone.rotation_quaternion = (1, 0, 0, 0)
+        bone.rotation_euler = (0, 0, 0)
+        bone.scale = (1, 1, 1)
+        
+        # Apply new position using matrix_basis for proper local space
+        bone.matrix_basis = Matrix.Translation(pos)
+
+
+def hide_meshes(context):
+    """Hide all mesh objects and store their visibility state"""
+    _viz_data['hidden_objects'].clear()
+    
+    for obj in context.scene.objects:
+        if obj.type == 'MESH' and obj.visible_get():
+            _viz_data['hidden_objects'].append(obj.name)
+            obj.hide_set(True)
+
+
+def restore_meshes(context):
+    """Restore visibility of previously hidden meshes"""
+    for obj_name in _viz_data['hidden_objects']:
+        if obj_name in context.scene.objects:
+            obj = context.scene.objects[obj_name]
+            obj.hide_set(False)
+    
+    _viz_data['hidden_objects'].clear()
+
+
+def toggle_bone_names_overlay(context, show):
+    """Toggle bone name overlay in viewport"""
+    for area in context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    # Try both old and new property names for compatibility
+                    if hasattr(space.overlay, 'show_bone_names'):
+                        space.overlay.show_bone_names = show
+                    elif hasattr(space.overlay, 'show_bones'):
+                        space.overlay.show_bones = show
+
+
+def store_bone_overlay_state(context):
+    """Store current bone name overlay state"""
+    for area in context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    # Try both old and new property names for compatibility
+                    if hasattr(space.overlay, 'show_bone_names'):
+                        _viz_data['original_bone_overlay_state'] = space.overlay.show_bone_names
+                    elif hasattr(space.overlay, 'show_bones'):
+                        _viz_data['original_bone_overlay_state'] = space.overlay.show_bones
+                    return
+
+
+def restore_bone_overlay_state(context):
+    """Restore original bone name overlay state"""
+    if _viz_data['original_bone_overlay_state'] is not None:
+        toggle_bone_names_overlay(context, _viz_data['original_bone_overlay_state'])
+        _viz_data['original_bone_overlay_state'] = None
 
 
 def calculate_relationship_lines(selected_bones, positions, armature):
@@ -311,6 +378,16 @@ class BONEANAL_OT_ExposeBones(Operator):
             self.report({'WARNING'}, "No bones selected")
             return {'CANCELLED'}
         
+        # Store armature name
+        _viz_data['armature_name'] = armature.name
+        
+        # Hide meshes
+        hide_meshes(context)
+        
+        # Store bone overlay state and hide bone names
+        store_bone_overlay_state(context)
+        toggle_bone_names_overlay(context, False)
+        
         # Store original transforms
         store_original_transforms(selected_bones)
         
@@ -351,18 +428,39 @@ class BONEANAL_OT_RestoreBones(Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
-        armature = context.active_object
+        armature = None
+        
+        # Try to get the armature we were working with
+        if _viz_data['armature_name'] and _viz_data['armature_name'] in bpy.data.objects:
+            armature = bpy.data.objects[_viz_data['armature_name']]
+        else:
+            armature = context.active_object
         
         if not armature or armature.type != 'ARMATURE':
+            self.report({'WARNING'}, "Armature not found")
             return {'CANCELLED'}
+        
+        # Make sure we're in pose mode
+        if context.active_object != armature:
+            context.view_layer.objects.active = armature
         
         if context.mode != 'POSE':
-            return {'CANCELLED'}
+            bpy.ops.object.mode_set(mode='POSE')
         
         # Restore original matrices
-        for bone_name, matrix in _viz_data['original_matrices'].items():
+        for bone_name, matrices in _viz_data['original_matrices'].items():
             if bone_name in armature.pose.bones:
-                armature.pose.bones[bone_name].matrix = matrix.copy()
+                bone = armature.pose.bones[bone_name]
+                bone.matrix_basis = matrices['matrix_basis'].copy()
+        
+        # Update the armature
+        context.view_layer.update()
+        
+        # Restore mesh visibility
+        restore_meshes(context)
+        
+        # Restore bone name overlay
+        restore_bone_overlay_state(context)
         
         # Clear visualization data
         _viz_data['exposed_bones'].clear()
@@ -370,6 +468,7 @@ class BONEANAL_OT_RestoreBones(Operator):
         _viz_data['hierarchy_lines'].clear()
         _viz_data['constraint_lines'].clear()
         _viz_data['is_active'] = False
+        _viz_data['armature_name'] = None
         
         context.scene.bone_analyzer.show_visualization = False
         
@@ -401,12 +500,14 @@ class BONEANAL_OT_Recalculate(Operator):
             return {'CANCELLED'}
         
         # Restore original positions first
-        for bone_name, matrix in _viz_data['original_matrices'].items():
+        for bone_name, matrices in _viz_data['original_matrices'].items():
             if bone_name in armature.pose.bones:
-                armature.pose.bones[bone_name].matrix = matrix.copy()
+                bone = armature.pose.bones[bone_name]
+                bone.matrix_basis = matrices['matrix_basis'].copy()
         
-        # Get selected bones
-        selected_bones = [b for b in armature.pose.bones if b.bone.select]
+        # Get the bones we're working with
+        bone_names = list(_viz_data['original_matrices'].keys())
+        selected_bones = [armature.pose.bones[name] for name in bone_names if name in armature.pose.bones]
         
         if not selected_bones:
             return {'CANCELLED'}
@@ -442,7 +543,7 @@ class BoneAnalyzerProperties(PropertyGroup):
         name="Show Visualization",
         description="Display bone hierarchy overlay in viewport",
         default=False,
-        update=lambda self, context: tag_redraw_all(context)
+        update=lambda self, context: update_visualization_toggle(self, context)
     )
     
     show_relationships: BoolProperty(
@@ -471,6 +572,19 @@ class BoneAnalyzerProperties(PropertyGroup):
         step=10,
         update=lambda self, context: recalc_if_active()
     )
+
+
+def update_visualization_toggle(self, context):
+    """Handle visualization toggle with bone name overlay"""
+    if self.show_visualization:
+        # Hide bone names when showing our overlay
+        toggle_bone_names_overlay(context, False)
+    else:
+        # Restore bone names when hiding our overlay
+        if _viz_data['original_bone_overlay_state'] is not None:
+            toggle_bone_names_overlay(context, _viz_data['original_bone_overlay_state'])
+    
+    tag_redraw_all(context)
 
 
 def tag_redraw_all(context):
@@ -562,12 +676,21 @@ def unregister():
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, 'WINDOW')
         _draw_handler = None
     
+    # Restore everything before unregistering
+    if _viz_data['is_active']:
+        context = bpy.context
+        restore_meshes(context)
+        restore_bone_overlay_state(context)
+    
     # Clear data
     _viz_data['exposed_bones'].clear()
     _viz_data['original_matrices'].clear()
     _viz_data['hierarchy_lines'].clear()
     _viz_data['constraint_lines'].clear()
+    _viz_data['hidden_objects'].clear()
     _viz_data['is_active'] = False
+    _viz_data['armature_name'] = None
+    _viz_data['original_bone_overlay_state'] = None
     
     # Unregister classes
     for cls in reversed(classes):
