@@ -6,3 +6,7 @@ Chibi's menu is project specific. It has a button for applying all shapekeys for
 render tools - 
 
 ![rendertools](https://github.com/user-attachments/assets/a243edec-6cd4-46c1-b250-7a40179e7634)
+
+expose bone relations - 
+
+![expose_bones2](https://github.com/user-attachments/assets/91705b4b-b757-457b-9964-03196e6e8ee4)
