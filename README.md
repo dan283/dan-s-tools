@@ -10,3 +10,7 @@ render tools -
 expose bone relations - 
 
 ![expose_bones2](https://github.com/user-attachments/assets/91705b4b-b757-457b-9964-03196e6e8ee4)
+
+lighting toolset with presets
+
+![Screenshot 2026-03-05 174858](https://github.com/user-attachments/assets/5a4e28ff-c47c-4134-b3e0-e0c662c890b7)
