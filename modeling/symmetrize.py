@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Symmetrize From Stored Seam",
+    "name": "Maya-Style Symmetrize From Seam",
     "author": "ChatGPT",
-    "version": (0, 3, 0),
+    "version": (0, 7, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Symmetrize",
-    "description": "Safer topology/spatial symmetrizer using one stored center seam edge and selected affected vertices.",
+    "description": "Maya-style topology-propagated symmetrize from one stored center seam edge.",
     "category": "Mesh",
 }
 
@@ -12,21 +12,16 @@ import bpy
 import bmesh
 from mathutils import Vector
 from bpy.props import EnumProperty, FloatProperty, BoolProperty, IntProperty
-from collections import deque, defaultdict
+from collections import deque
 
-
-# ------------------------------------------------------------
-# Storage keys
-# ------------------------------------------------------------
 
 SEAM_EDGE_KEY = "symmetrize_stored_single_seam_edge_index"
 SEAM_AXIS_KEY = "symmetrize_stored_axis"
 SEAM_OFFSET_KEY = "symmetrize_stored_plane_offset"
-SEAM_DIR_KEY = "symmetrize_stored_seam_direction"
 
 
 # ------------------------------------------------------------
-# Math helpers
+# Math
 # ------------------------------------------------------------
 
 
@@ -49,14 +44,6 @@ def set_axis_value(co: Vector, axis: str, value: float) -> Vector:
     return out
 
 
-def axis_vector(axis: str) -> Vector:
-    if axis == "X":
-        return Vector((1.0, 0.0, 0.0))
-    if axis == "Y":
-        return Vector((0.0, 1.0, 0.0))
-    return Vector((0.0, 0.0, 1.0))
-
-
 def signed_distance_to_plane(co: Vector, axis: str, offset: float) -> float:
     return axis_value(co, axis) - offset
 
@@ -72,22 +59,6 @@ def reflect_across_axis_plane(co: Vector, axis: str, offset: float) -> Vector:
     return out
 
 
-def project_to_plane(co: Vector, axis: str, offset: float) -> Vector:
-    return set_axis_value(co, axis, offset)
-
-
-def perpendicular_projection(co: Vector, axis: str) -> Vector:
-    """Return the coordinate components parallel to the symmetry plane."""
-    out = co.copy()
-    if axis == "X":
-        out.x = 0.0
-    elif axis == "Y":
-        out.y = 0.0
-    else:
-        out.z = 0.0
-    return out
-
-
 def classify_vertex(v, axis: str, offset: float, eps: float):
     d = signed_distance_to_plane(v.co, axis, offset)
     if abs(d) <= eps:
@@ -96,14 +67,9 @@ def classify_vertex(v, axis: str, offset: float, eps: float):
 
 
 def guess_axis_from_edge(edge):
-    """
-    Guess mirror axis from a selected center edge.
-    The mirror axis is the object-space axis most perpendicular to the seam edge.
-    For a vertical body seam, the edge points mostly Z, so X/Y are candidates.
-    We choose the axis with the smallest edge-direction component.
-    """
+    # Object axis least aligned with selected seam edge.
     v0, v1 = edge.verts
-    d = (v1.co - v0.co)
+    d = v1.co - v0.co
     if d.length == 0.0:
         return "X"
     d.normalize()
@@ -112,160 +78,253 @@ def guess_axis_from_edge(edge):
 
 
 # ------------------------------------------------------------
-# Stored seam helpers
+# Stored seam
 # ------------------------------------------------------------
 
 
-def store_seam(obj, edge_index, axis, offset, seam_dir):
+def store_seam(obj, edge_index, axis, offset):
     obj[SEAM_EDGE_KEY] = int(edge_index)
     obj[SEAM_AXIS_KEY] = axis
     obj[SEAM_OFFSET_KEY] = float(offset)
-    obj[SEAM_DIR_KEY] = [float(seam_dir.x), float(seam_dir.y), float(seam_dir.z)]
+
+
+def clear_stored_seam(obj):
+    for key in (SEAM_EDGE_KEY, SEAM_AXIS_KEY, SEAM_OFFSET_KEY):
+        if key in obj:
+            del obj[key]
 
 
 def has_stored_seam(obj):
     return SEAM_EDGE_KEY in obj and SEAM_AXIS_KEY in obj and SEAM_OFFSET_KEY in obj
 
 
-def clear_stored_seam(obj):
-    for k in (SEAM_EDGE_KEY, SEAM_AXIS_KEY, SEAM_OFFSET_KEY, SEAM_DIR_KEY):
-        if k in obj:
-            del obj[k]
+def get_stored_edge_index(obj):
+    return int(obj.get(SEAM_EDGE_KEY, -1))
 
 
-def get_stored_axis(obj, fallback="X"):
-    return obj.get(SEAM_AXIS_KEY, fallback)
+def get_stored_axis(obj):
+    return obj.get(SEAM_AXIS_KEY, "X")
 
 
 def get_stored_offset(obj):
     return float(obj.get(SEAM_OFFSET_KEY, 0.0))
 
 
-def get_stored_edge_index(obj):
-    return int(obj.get(SEAM_EDGE_KEY, -1))
-
-
 # ------------------------------------------------------------
-# Robust matching helpers
+# Topology correspondence: Maya-style face propagation
 # ------------------------------------------------------------
 
 
-def get_center_vertices(bm, axis, offset, center_tolerance):
-    return [v for v in bm.verts if abs(signed_distance_to_plane(v.co, axis, offset)) <= center_tolerance]
+def face_side_score(face, axis, offset):
+    if not face.verts:
+        return 0.0
+    return sum(signed_distance_to_plane(v.co, axis, offset) for v in face.verts) / len(face.verts)
 
 
-def connected_component_from_vertex(start, allowed_set):
-    allowed = set(allowed_set)
-    if start not in allowed:
-        return set()
-
-    found = set([start])
-    q = deque([start])
-
-    while q:
-        v = q.popleft()
-        for e in v.link_edges:
-            n = e.other_vert(v)
-            if n in allowed and n not in found:
-                found.add(n)
-                q.append(n)
-
-    return found
+def edge_key_from_verts(v1, v2):
+    return tuple(sorted((v1.index, v2.index)))
 
 
-def build_bfs_addresses(seam_verts, side_verts):
-    """
-    Multi-source BFS from center seam into one side.
-    Each vertex gets:
-        root seam vertex index
-        depth/ring distance from seam
-    This gives a stable topology address without greedy pair cascading.
-    """
-    side_set = set(side_verts)
-    address = {}
-    q = deque()
-
-    # Seed neighbours of every seam vertex.
-    for root in seam_verts:
-        for e in root.link_edges:
-            n = e.other_vert(root)
-            if n in side_set and n not in address:
-                address[n] = (root.index, 1)
-                q.append((n, root.index, 1))
-
-    while q:
-        v, root_index, depth = q.popleft()
-        for e in v.link_edges:
-            n = e.other_vert(v)
-            if n in side_set and n not in address:
-                address[n] = (root_index, depth + 1)
-                q.append((n, root_index, depth + 1))
-
-    return address
+def find_edge_between(v1, v2):
+    for e in v1.link_edges:
+        if e.other_vert(v1) == v2:
+            return e
+    return None
 
 
-def edge_length_median(bm):
-    lengths = sorted(e.calc_length() for e in bm.edges if e.calc_length() > 0.0)
-    if not lengths:
-        return 1.0
-    return lengths[len(lengths) // 2]
+def face_other_across_edge(face, edge):
+    for f in edge.link_faces:
+        if f != face:
+            return f
+    return None
 
 
-def build_source_buckets(source_verts, source_addr):
-    buckets = defaultdict(list)
-    for v in source_verts:
-        if v in source_addr:
-            root_index, depth = source_addr[v]
-            buckets[(root_index, depth)].append(v)
-    return buckets
-
-
-def match_source_for_target(target_v, target_addr, source_buckets, axis, offset, max_parallel_distance):
-    """
-    Match a target vertex to a source vertex using:
-    1. same seam root
-    2. same graph depth from seam
-    3. closest position after reflecting target into source space, measured only parallel to plane
-
-    This avoids the old cascading greedy neighbour-pair problem.
-    """
-    if target_v not in target_addr:
-        return None, None
-
-    key = target_addr[target_v]
-    candidates = source_buckets.get(key, [])
-
-    # If exact depth bucket is empty, try adjacent depths as a fallback.
-    if not candidates:
-        root_index, depth = key
-        for delta in (1, -1, 2, -2):
-            candidates = source_buckets.get((root_index, depth + delta), [])
-            if candidates:
-                break
-
-    if not candidates:
-        return None, None
-
-    reflected_target = reflect_across_axis_plane(target_v.co, axis, offset)
-    reflected_parallel = perpendicular_projection(reflected_target, axis)
-
+def best_vertex_match(src_v, candidates, axis, offset, used_targets):
+    """Small local fallback used only inside already-paired faces."""
     best = None
     best_dist = None
+    wanted = reflect_across_axis_plane(src_v.co, axis, offset)
 
-    for src in candidates:
-        src_parallel = perpendicular_projection(src.co, axis)
-        dist = (src_parallel - reflected_parallel).length
-        if best is None or dist < best_dist:
-            best = src
-            best_dist = dist
+    for t in candidates:
+        if t in used_targets:
+            continue
+        d = (t.co - wanted).length
+        if best is None or d < best_dist:
+            best = t
+            best_dist = d
+    return best
+
+
+def complete_face_vertex_map(src_face, tgt_face, current_vmap, axis, offset):
+    """
+    Complete source->target vertex mapping for a paired face.
+
+    Existing mapped vertices are anchors, usually the shared propagated edge.
+    Remaining verts are matched locally within the paired faces only, so this
+    cannot jump to wrist/arm/torso and flatten the mesh.
+    """
+    local = {}
+    used_targets = set()
+
+    for sv in src_face.verts:
+        if sv in current_vmap and current_vmap[sv] in tgt_face.verts:
+            local[sv] = current_vmap[sv]
+            used_targets.add(current_vmap[sv])
+
+    remaining_src = [v for v in src_face.verts if v not in local]
+    remaining_tgt = [v for v in tgt_face.verts if v not in used_targets]
+
+    if len(remaining_src) != len(remaining_tgt):
+        return None
+
+    for sv in remaining_src:
+        tv = best_vertex_match(sv, remaining_tgt, axis, offset, used_targets)
+        if tv is None:
+            return None
+        local[sv] = tv
+        used_targets.add(tv)
+
+    return local
+
+
+def seed_face_pair_from_seam_edge(seam_edge, axis, offset):
+    """
+    The selected seam edge should have one adjacent face on each side.
+    Those two faces are the initial source/target face pair.
+    """
+    faces = list(seam_edge.link_faces)
+    if len(faces) < 2:
+        return None, None
+
+    # Pick the two faces with the most opposite side scores.
+    best = None
+    best_score = None
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            si = face_side_score(faces[i], axis, offset)
+            sj = face_side_score(faces[j], axis, offset)
+            score = abs(si - sj)
+            if best is None or score > best_score:
+                best = (faces[i], faces[j])
+                best_score = score
 
     if best is None:
         return None, None
 
-    if max_parallel_distance > 0.0 and best_dist > max_parallel_distance:
-        return None, best_dist
+    f1, f2 = best
+    if face_side_score(f1, axis, offset) >= face_side_score(f2, axis, offset):
+        return f1, f2
+    return f2, f1
 
-    return best, best_dist
+
+def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
+    """
+    Build POS->NEG vertex correspondence by propagating paired faces.
+
+    This is the Maya-like part:
+    - start from the two faces adjacent to the selected seam edge
+    - map seam verts to themselves
+    - map remaining first-face verts by local reflected position
+    - walk across corresponding edges on both sides
+    - each new face pair completes only from its already-known shared edge
+
+    No global nearest-vertex matching is used.
+    """
+
+    pos_seed, neg_seed = seed_face_pair_from_seam_edge(seam_edge, axis, offset)
+    if pos_seed is None or neg_seed is None:
+        return {}, {}, 0
+
+    pos_to_neg = {}
+    neg_to_pos = {}
+    paired_faces = {}
+    queue = deque()
+
+    # Seam vertices map to themselves for the initial edge anchors.
+    for v in seam_edge.verts:
+        pos_to_neg[v] = v
+        neg_to_pos[v] = v
+
+    seed_map = complete_face_vertex_map(pos_seed, neg_seed, pos_to_neg, axis, offset)
+    if seed_map is None:
+        return {}, {}, 0
+
+    for pv, nv in seed_map.items():
+        pos_to_neg[pv] = nv
+        neg_to_pos[nv] = pv
+
+    paired_faces[pos_seed] = neg_seed
+    queue.append((pos_seed, neg_seed))
+
+    processed = 0
+
+    while queue and processed < max_faces:
+        pos_face, neg_face = queue.popleft()
+        processed += 1
+
+        # Ensure this face pair has complete local vertex correspondence.
+        local_map = complete_face_vertex_map(pos_face, neg_face, pos_to_neg, axis, offset)
+        if local_map is None:
+            continue
+
+        for pv, nv in local_map.items():
+            if pv not in pos_to_neg:
+                pos_to_neg[pv] = nv
+            if nv not in neg_to_pos:
+                neg_to_pos[nv] = pv
+
+        # Propagate across every non-seam edge of the positive face.
+        for pe in pos_face.edges:
+            pa, pb = pe.verts
+
+            if pa not in pos_to_neg or pb not in pos_to_neg:
+                continue
+
+            na = pos_to_neg[pa]
+            nb = pos_to_neg[pb]
+            ne = find_edge_between(na, nb)
+            if ne is None:
+                continue
+
+            next_pos_face = face_other_across_edge(pos_face, pe)
+            next_neg_face = face_other_across_edge(neg_face, ne)
+
+            if next_pos_face is None or next_neg_face is None:
+                continue
+
+            if next_pos_face in paired_faces:
+                continue
+
+            # Reject if both faces are actually on the same side. This guards
+            # against walking around borders into the wrong region.
+            if face_side_score(next_pos_face, axis, offset) < face_side_score(next_neg_face, axis, offset):
+                next_pos_face, next_neg_face = next_neg_face, next_pos_face
+
+            candidate_map = complete_face_vertex_map(next_pos_face, next_neg_face, pos_to_neg, axis, offset)
+            if candidate_map is None:
+                continue
+
+            # Conflict check. Never overwrite an existing pair with a different one.
+            conflict = False
+            for pv, nv in candidate_map.items():
+                if pv in pos_to_neg and pos_to_neg[pv] != nv:
+                    conflict = True
+                    break
+                if nv in neg_to_pos and neg_to_pos[nv] != pv:
+                    conflict = True
+                    break
+
+            if conflict:
+                continue
+
+            for pv, nv in candidate_map.items():
+                pos_to_neg[pv] = nv
+                neg_to_pos[nv] = pv
+
+            paired_faces[next_pos_face] = next_neg_face
+            queue.append((next_pos_face, next_neg_face))
+
+    return pos_to_neg, neg_to_pos, processed
 
 
 # ------------------------------------------------------------
@@ -273,17 +332,16 @@ def match_source_for_target(target_v, target_addr, source_buckets, axis, offset,
 # ------------------------------------------------------------
 
 class MESH_OT_store_symmetrize_seam(bpy.types.Operator):
-    """Store ONE selected center seam edge"""
+    """Store one selected center seam edge"""
 
     bl_idname = "mesh.store_symmetrize_seam"
-    bl_label = "Store Selected Seam Edge"
+    bl_label = "Store Seam Edge"
     bl_options = {"REGISTER", "UNDO"}
 
     axis: EnumProperty(
         name="Mirror Axis",
-        description="Axis perpendicular to the symmetry plane. Auto usually works if the seam edge is vertical.",
         items=(
-            ("AUTO", "Auto", "Guess from selected edge"),
+            ("AUTO", "Auto", "Guess axis from selected edge"),
             ("X", "X", "Mirror across object-space X plane"),
             ("Y", "Y", "Mirror across object-space Y plane"),
             ("Z", "Z", "Mirror across object-space Z plane"),
@@ -301,24 +359,18 @@ class MESH_OT_store_symmetrize_seam(bpy.types.Operator):
         bm = bmesh.from_edit_mesh(obj.data)
         bm.edges.ensure_lookup_table()
 
-        selected = [e for e in bm.edges if e.select]
-        if not selected:
-            self.report({"ERROR"}, "Select one edge on the center seam.")
+        selected_edges = [e for e in bm.edges if e.select]
+        if not selected_edges:
+            self.report({"ERROR"}, "Select one edge on the center seam first.")
             return {"CANCELLED"}
 
-        edge = selected[0]
+        edge = selected_edges[0]
         v0, v1 = edge.verts
         axis = guess_axis_from_edge(edge) if self.axis == "AUTO" else self.axis
         offset = (axis_value(v0.co, axis) + axis_value(v1.co, axis)) * 0.5
 
-        seam_dir = v1.co - v0.co
-        if seam_dir.length > 0.0:
-            seam_dir.normalize()
-        else:
-            seam_dir = Vector((0.0, 0.0, 1.0))
-
-        store_seam(obj, edge.index, axis, offset, seam_dir)
-        self.report({"INFO"}, f"Stored seam edge {edge.index}, axis {axis}, plane offset {offset:.6f}.")
+        store_seam(obj, edge.index, axis, offset)
+        self.report({"INFO"}, f"Stored edge {edge.index}; axis {axis}; offset {offset:.6f}")
         return {"FINISHED"}
 
 
@@ -326,7 +378,7 @@ class MESH_OT_clear_symmetrize_seam(bpy.types.Operator):
     """Clear stored seam"""
 
     bl_idname = "mesh.clear_symmetrize_seam"
-    bl_label = "Clear Stored Seam"
+    bl_label = "Clear Seam"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -341,54 +393,42 @@ class MESH_OT_clear_symmetrize_seam(bpy.types.Operator):
 
 
 class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
-    """Symmetrize only selected vertices using the stored seam edge"""
+    """Maya-style topology symmetrize selected vertices"""
 
     bl_idname = "mesh.symmetrize_selected_from_stored_seam"
     bl_label = "Symmetrize Selected"
     bl_options = {"REGISTER", "UNDO"}
 
-    source_side: EnumProperty(
-        name="Direction",
-        description="Which side is copied onto the selected target side",
+    mode: EnumProperty(
+        name="Mode",
         items=(
-            ("POS", "+ to -", "Copy positive side to selected negative-side vertices"),
-            ("NEG", "- to +", "Copy negative side to selected positive-side vertices"),
+            ("AUTO", "Auto selected side", "Selected vertices on either side are mirrored from their topological opposite"),
+            ("POS_TO_NEG", "+ to - only", "Only selected negative-side vertices are moved from positive side"),
+            ("NEG_TO_POS", "- to + only", "Only selected positive-side vertices are moved from negative side"),
         ),
-        default="POS",
+        default="AUTO",
     )
 
     center_tolerance: FloatProperty(
         name="Center Tolerance",
-        description="How close vertices must be to the stored symmetry plane to count as center seam vertices",
-        default=0.001,
+        description="Selected vertices this close to the stored plane can be treated as center vertices",
+        default=0.0001,
         min=0.0,
         precision=6,
     )
 
     snap_selected_center: BoolProperty(
-        name="Snap Selected Center Verts",
-        description="Selected center vertices are projected exactly onto the symmetry plane",
-        default=True,
+        name="Snap Selected Center",
+        description="Project selected center vertices onto the symmetry plane",
+        default=False,
     )
 
-    max_match_distance: FloatProperty(
-        name="Max Match Distance",
-        description="Safety distance for matching parallel coordinates. 0 disables the limit. Increase if many vertices are skipped.",
-        default=0.0,
-        min=0.0,
-        precision=5,
-    )
-
-    use_connected_center_component: BoolProperty(
-        name="Use Connected Seam Component",
-        description="Use the connected center-line component containing the stored edge. Disable if the seam has small breaks.",
-        default=True,
-    )
-
-    include_unselected_sources: BoolProperty(
-        name="Use Unselected Source Side",
-        description="Source vertices do not need to be selected. Only target vertices need selection.",
-        default=True,
+    max_faces: IntProperty(
+        name="Max Propagated Faces",
+        description="Safety limit for topology propagation",
+        default=200000,
+        min=100,
+        max=1000000,
     )
 
     @classmethod
@@ -399,7 +439,7 @@ class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
     def execute(self, context):
         obj = context.object
         if not has_stored_seam(obj):
-            self.report({"ERROR"}, "No stored seam. Select one center seam edge and click Store Selected Seam Edge first.")
+            self.report({"ERROR"}, "No stored seam. Select one center edge and click Store Seam Edge.")
             return {"CANCELLED"}
 
         bm = bmesh.from_edit_mesh(obj.data)
@@ -409,117 +449,76 @@ class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
 
         edge_index = get_stored_edge_index(obj)
         if edge_index < 0 or edge_index >= len(bm.edges):
-            self.report({"ERROR"}, "Stored seam edge index is invalid. Store the seam again.")
+            self.report({"ERROR"}, "Stored seam edge is invalid. Store it again.")
             return {"CANCELLED"}
 
-        stored_edge = bm.edges[edge_index]
+        seam_edge = bm.edges[edge_index]
         axis = get_stored_axis(obj)
         offset = get_stored_offset(obj)
 
-        all_center_verts = get_center_vertices(bm, axis, offset, self.center_tolerance)
-        if len(all_center_verts) < 2:
-            self.report({"ERROR"}, "Could not infer center seam. Increase Center Tolerance or store the seam again.")
-            return {"CANCELLED"}
-
-        stored_edge_verts = set(stored_edge.verts)
-        if self.use_connected_center_component:
-            # Prefer the continuous center-line connected to the stored edge.
-            start = stored_edge.verts[0]
-            seam_verts = connected_component_from_vertex(start, set(all_center_verts))
-            # If only one end was included by tolerance, fall back to all center verts.
-            if len(seam_verts) < 2 or not stored_edge_verts.issubset(seam_verts):
-                seam_verts = set(all_center_verts)
-        else:
-            seam_verts = set(all_center_verts)
-
-        selected = {v for v in bm.verts if v.select}
+        selected = [v for v in bm.verts if v.select]
         if not selected:
-            self.report({"ERROR"}, "Select the target vertices you want to symmetrize.")
+            self.report({"ERROR"}, "Select vertices to symmetrize.")
             return {"CANCELLED"}
 
-        source_label = self.source_side
-        target_label = "NEG" if source_label == "POS" else "POS"
+        pos_to_neg, neg_to_pos, face_count = build_topology_correspondence(
+            seam_edge,
+            axis,
+            offset,
+            self.max_faces,
+        )
 
-        source_verts = []
-        target_verts = []
-        center_selected = []
-
-        for v in bm.verts:
-            cls = classify_vertex(v, axis, offset, self.center_tolerance)
-            if cls == source_label:
-                source_verts.append(v)
-            elif cls == target_label:
-                target_verts.append(v)
-
-        if not self.include_unselected_sources:
-            source_verts = [v for v in source_verts if v.select]
-
-        selected_targets = [v for v in selected if classify_vertex(v, axis, offset, self.center_tolerance) == target_label]
-        center_selected = [v for v in selected if classify_vertex(v, axis, offset, self.center_tolerance) == "CENTER"]
-
-        if not selected_targets and not center_selected:
-            self.report({"ERROR"}, "No selected vertices found on the target side or center seam.")
+        if not pos_to_neg or not neg_to_pos:
+            self.report({"ERROR"}, "Could not build topology correspondence from the stored seam edge.")
             return {"CANCELLED"}
-
-        # Build stable topological addresses independently on both sides.
-        source_addr = build_bfs_addresses(seam_verts, source_verts)
-        target_addr = build_bfs_addresses(seam_verts, target_verts)
-        source_buckets = build_source_buckets(source_verts, source_addr)
-
-        if not source_buckets:
-            self.report({"ERROR"}, "Could not build source-side topology map. Check source direction or center tolerance.")
-            return {"CANCELLED"}
-
-        # If no explicit max distance, use a very generous derived value for reporting only.
-        median_len = edge_length_median(bm)
-        max_dist = self.max_match_distance
 
         moved = 0
         skipped = 0
         snapped = 0
-        worst_match = 0.0
 
-        for tgt in selected_targets:
-            src, dist = match_source_for_target(
-                tgt,
-                target_addr,
-                source_buckets,
-                axis,
-                offset,
-                max_dist,
-            )
+        # Copy from original coordinates, not progressively modified ones.
+        original_positions = {v: v.co.copy() for v in bm.verts}
 
-            if src is None:
+        for v in selected:
+            side = classify_vertex(v, axis, offset, self.center_tolerance)
+
+            if side == "CENTER":
+                if self.snap_selected_center:
+                    v.co = set_axis_value(v.co, axis, offset)
+                    snapped += 1
+                continue
+
+            if self.mode == "POS_TO_NEG" and side != "NEG":
+                skipped += 1
+                continue
+            if self.mode == "NEG_TO_POS" and side != "POS":
                 skipped += 1
                 continue
 
-            if dist is not None:
-                worst_match = max(worst_match, dist)
+            if side == "NEG":
+                src = neg_to_pos.get(v)
+            else:
+                src = pos_to_neg.get(v)
 
-            tgt.co = reflect_across_axis_plane(src.co, axis, offset)
+            if src is None or src == v:
+                skipped += 1
+                continue
+
+            v.co = reflect_across_axis_plane(original_positions[src], axis, offset)
             moved += 1
 
-        if self.snap_selected_center:
-            for v in center_selected:
-                v.co = project_to_plane(v.co, axis, offset)
-                snapped += 1
-
         bmesh.update_edit_mesh(obj.data)
-
-        self.report(
-            {"INFO"},
-            f"Moved {moved}, snapped {snapped}, skipped {skipped}. Axis {axis}, seam verts {len(seam_verts)}, worst match {worst_match:.5f}."
-        )
+        self.report({"INFO"}, f"Moved {moved}; skipped {skipped}; snapped {snapped}; propagated faces {face_count}")
         return {"FINISHED"}
 
 
 # ------------------------------------------------------------
-# N-panel UI
+# UI
 # ------------------------------------------------------------
 
-class VIEW3D_PT_symmetrize_from_stored_seam(bpy.types.Panel):
-    bl_label = "Symmetrize From Seam"
-    bl_idname = "VIEW3D_PT_symmetrize_from_stored_seam"
+class VIEW3D_PT_symmetrize_from_stored_seam_clean(bpy.types.Panel):
+    bl_label = "Symmetrize"
+    bl_idname = "VIEW3D_PT_symmetrize_from_stored_seam_clean"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Symmetrize"
@@ -528,59 +527,80 @@ class VIEW3D_PT_symmetrize_from_stored_seam(bpy.types.Panel):
         layout = self.layout
         obj = context.object
 
-        col = layout.column(align=True)
-        col.label(text="1. Store Center Seam")
-
         if obj is None or obj.type != "MESH":
-            col.label(text="Select a mesh object.", icon="INFO")
+            layout.label(text="Select a mesh object.", icon="INFO")
             return
 
-        row = col.row(align=True)
-        row.operator("mesh.store_symmetrize_seam", text="Store Selected Seam Edge", icon="EDGESEL")
+        if context.mode != "EDIT_MESH":
+            layout.label(text="Enter Edit Mode.", icon="INFO")
+            return
+
+        box = layout.box()
+        box.label(text="1. Store center seam", icon="EDGESEL")
+        row = box.row(align=True)
+        row.operator("mesh.store_symmetrize_seam", text="Store Selected Edge")
         row.operator("mesh.clear_symmetrize_seam", text="", icon="TRASH")
 
         if has_stored_seam(obj):
-            axis = get_stored_axis(obj)
-            offset = get_stored_offset(obj)
-            edge_index = get_stored_edge_index(obj)
-            col.label(text=f"Stored edge: {edge_index} | Axis: {axis} | Offset: {offset:.5f}", icon="CHECKMARK")
+            box.label(text=f"Edge {get_stored_edge_index(obj)} | {get_stored_axis(obj)}={get_stored_offset(obj):.5f}", icon="CHECKMARK")
         else:
-            col.label(text="No seam stored.", icon="INFO")
+            box.label(text="No seam stored", icon="INFO")
 
-        layout.separator()
         box = layout.box()
-        box.label(text="2. Select Vertices")
-        box.label(text="Select only the target-side vertices")
-        box.label(text="you want moved.")
+        box.label(text="2. Select target vertices", icon="VERTEXSEL")
+        box.operator("mesh.symmetrize_selected_from_stored_seam", text="Symmetrize Selected", icon="MOD_MIRROR")
 
-        layout.separator()
         col = layout.column(align=True)
-        col.label(text="3. Symmetrize")
-        col.operator("mesh.symmetrize_selected_from_stored_seam", text="Symmetrize Selected", icon="MOD_MIRROR")
-
-        helpbox = layout.box()
-        helpbox.label(text="Important:")
-        helpbox.label(text="Use + to - or - to + in redo panel.")
-        helpbox.label(text="If vertices are skipped, increase")
-        helpbox.label(text="Center Tolerance or Max Match Distance.")
+        col.label(text="Maya-style topology mode:")
+        col.label(text="Pairs are propagated face-to-face")
+        col.label(text="from the stored seam edge.")
+        col.label(text="No global nearest matching.")
 
 
 classes = (
     MESH_OT_store_symmetrize_seam,
     MESH_OT_clear_symmetrize_seam,
     MESH_OT_symmetrize_selected_from_stored_seam,
-    VIEW3D_PT_symmetrize_from_stored_seam,
+    VIEW3D_PT_symmetrize_from_stored_seam_clean,
+)
+
+LEGACY_CLASS_NAMES = (
+    "VIEW3D_PT_symmetrize_from_seam",
+    "VIEW3D_PT_symmetrize_from_stored_seam",
+    "MESH_OT_symmetrize_from_seam",
 )
 
 
+def unregister_legacy_classes():
+    for name in LEGACY_CLASS_NAMES:
+        cls = getattr(bpy.types, name, None)
+        if cls is not None:
+            try:
+                bpy.utils.unregister_class(cls)
+            except Exception:
+                pass
+
+
 def register():
+    unregister_legacy_classes()
     for cls in classes:
-        bpy.utils.register_class(cls)
+        try:
+            bpy.utils.register_class(cls)
+        except ValueError:
+            try:
+                bpy.utils.unregister_class(cls)
+            except Exception:
+                pass
+            bpy.utils.register_class(cls)
 
 
 def unregister():
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
+    unregister_legacy_classes()
 
 
 if __name__ == "__main__":
