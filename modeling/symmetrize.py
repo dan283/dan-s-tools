@@ -155,36 +155,79 @@ def best_vertex_match(src_v, candidates, axis, offset, used_targets):
     return best
 
 
+def rotate_list_to_start(seq, start_index):
+    return seq[start_index:] + seq[:start_index]
+
+
+def mapping_error(candidate_map, axis, offset):
+    err = 0.0
+    for sv, tv in candidate_map.items():
+        wanted = reflect_across_axis_plane(sv.co, axis, offset)
+        err += (tv.co - wanted).length
+    return err
+
+
 def complete_face_vertex_map(src_face, tgt_face, current_vmap, axis, offset):
     """
-    Complete source->target vertex mapping for a paired face.
+    Complete source->target vertex mapping for paired faces using polygon order.
 
-    Existing mapped vertices are anchors, usually the shared propagated edge.
-    Remaining verts are matched locally within the paired faces only, so this
-    cannot jump to wrist/arm/torso and flatten the mesh.
+    This is stricter than nearest-corner matching.
+    Given at least a shared mapped edge, map the whole face by loop order.
+    Test both winding directions and pick the lower reflection error.
+
+    This prevents the last remaining stray vertices caused by wrong local
+    corner choices inside quads/triangles.
     """
-    local = {}
-    used_targets = set()
+    src_verts = list(src_face.verts)
+    tgt_verts = list(tgt_face.verts)
 
-    for sv in src_face.verts:
-        if sv in current_vmap and current_vmap[sv] in tgt_face.verts:
-            local[sv] = current_vmap[sv]
-            used_targets.add(current_vmap[sv])
-
-    remaining_src = [v for v in src_face.verts if v not in local]
-    remaining_tgt = [v for v in tgt_face.verts if v not in used_targets]
-
-    if len(remaining_src) != len(remaining_tgt):
+    if len(src_verts) != len(tgt_verts):
         return None
 
-    for sv in remaining_src:
-        tv = best_vertex_match(sv, remaining_tgt, axis, offset, used_targets)
-        if tv is None:
-            return None
-        local[sv] = tv
-        used_targets.add(tv)
+    n = len(src_verts)
+    anchors = []
 
-    return local
+    for i, sv in enumerate(src_verts):
+        tv = current_vmap.get(sv)
+        if tv is not None and tv in tgt_verts:
+            anchors.append((i, tgt_verts.index(tv)))
+
+    # Need at least one anchor. Usually there are two: the propagated edge.
+    if not anchors:
+        return None
+
+    candidates = []
+
+    # Try every anchor as alignment seed, both windings.
+    for src_i, tgt_i in anchors:
+        src_rot = rotate_list_to_start(src_verts, src_i)
+
+        tgt_forward = rotate_list_to_start(tgt_verts, tgt_i)
+        map_forward = {src_rot[k]: tgt_forward[k] for k in range(n)}
+        candidates.append(map_forward)
+
+        # Reverse winding but keep anchored target vertex first.
+        tgt_rev_raw = list(reversed(tgt_verts))
+        tgt_rev_i = tgt_rev_raw.index(tgt_verts[tgt_i])
+        tgt_reverse = rotate_list_to_start(tgt_rev_raw, tgt_rev_i)
+        map_reverse = {src_rot[k]: tgt_reverse[k] for k in range(n)}
+        candidates.append(map_reverse)
+
+    valid = []
+    for cand in candidates:
+        ok = True
+        for sv, tv in cand.items():
+            existing = current_vmap.get(sv)
+            if existing is not None and existing != tv:
+                ok = False
+                break
+        if ok:
+            valid.append(cand)
+
+    if not valid:
+        return None
+
+    return min(valid, key=lambda m: mapping_error(m, axis, offset))
 
 
 def seed_face_pair_from_seam_edge(seam_edge, axis, offset):
@@ -238,6 +281,7 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
     pos_to_neg = {}
     neg_to_pos = {}
     paired_faces = {}
+    used_neg_faces = set()
     queue = deque()
 
     # Seam vertices map to themselves for the initial edge anchors.
@@ -254,6 +298,7 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
         neg_to_pos[nv] = pv
 
     paired_faces[pos_seed] = neg_seed
+    used_neg_faces.add(neg_seed)
     queue.append((pos_seed, neg_seed))
 
     processed = 0
@@ -294,11 +339,17 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
 
             if next_pos_face in paired_faces:
                 continue
+            if next_neg_face in used_neg_faces:
+                continue
 
-            # Reject if both faces are actually on the same side. This guards
-            # against walking around borders into the wrong region.
+            # Do not swap faces here. If topology propagation produces faces on
+            # unexpected sides, skip them instead of guessing. Guessing is what
+            # creates stray mismatches.
             if face_side_score(next_pos_face, axis, offset) < face_side_score(next_neg_face, axis, offset):
-                next_pos_face, next_neg_face = next_neg_face, next_pos_face
+                continue
+
+            if len(next_pos_face.verts) != len(next_neg_face.verts):
+                continue
 
             candidate_map = complete_face_vertex_map(next_pos_face, next_neg_face, pos_to_neg, axis, offset)
             if candidate_map is None:
@@ -322,6 +373,7 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
                 neg_to_pos[nv] = pv
 
             paired_faces[next_pos_face] = next_neg_face
+            used_neg_faces.add(next_neg_face)
             queue.append((next_pos_face, next_neg_face))
 
     return pos_to_neg, neg_to_pos, processed
