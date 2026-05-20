@@ -1,16 +1,17 @@
 bl_info = {
     "name": "Maya-Style Symmetrize From Seam",
     "author": "ChatGPT",
-    "version": (0, 7, 0),
+    "version": (0, 8, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Symmetrize",
-    "description": "Maya-style topology-propagated symmetrize from one stored center seam edge.",
+    "description": "Maya-style topology symmetrize from one stored center seam edge, with neighbor-average fallback for asymmetrical topology.",
     "category": "Mesh",
 }
 
 import bpy
 import bmesh
 from mathutils import Vector
+from mathutils.kdtree import KDTree
 from bpy.props import EnumProperty, FloatProperty, BoolProperty, IntProperty
 from collections import deque
 
@@ -67,7 +68,6 @@ def classify_vertex(v, axis: str, offset: float, eps: float):
 
 
 def guess_axis_from_edge(edge):
-    # Object axis least aligned with selected seam edge.
     v0, v1 = edge.verts
     d = v1.co - v0.co
     if d.length == 0.0:
@@ -121,10 +121,6 @@ def face_side_score(face, axis, offset):
     return sum(signed_distance_to_plane(v.co, axis, offset) for v in face.verts) / len(face.verts)
 
 
-def edge_key_from_verts(v1, v2):
-    return tuple(sorted((v1.index, v2.index)))
-
-
 def find_edge_between(v1, v2):
     for e in v1.link_edges:
         if e.other_vert(v1) == v2:
@@ -137,22 +133,6 @@ def face_other_across_edge(face, edge):
         if f != face:
             return f
     return None
-
-
-def best_vertex_match(src_v, candidates, axis, offset, used_targets):
-    """Small local fallback used only inside already-paired faces."""
-    best = None
-    best_dist = None
-    wanted = reflect_across_axis_plane(src_v.co, axis, offset)
-
-    for t in candidates:
-        if t in used_targets:
-            continue
-        d = (t.co - wanted).length
-        if best is None or d < best_dist:
-            best = t
-            best_dist = d
-    return best
 
 
 def rotate_list_to_start(seq, start_index):
@@ -168,16 +148,6 @@ def mapping_error(candidate_map, axis, offset):
 
 
 def complete_face_vertex_map(src_face, tgt_face, current_vmap, axis, offset):
-    """
-    Complete source->target vertex mapping for paired faces using polygon order.
-
-    This is stricter than nearest-corner matching.
-    Given at least a shared mapped edge, map the whole face by loop order.
-    Test both winding directions and pick the lower reflection error.
-
-    This prevents the last remaining stray vertices caused by wrong local
-    corner choices inside quads/triangles.
-    """
     src_verts = list(src_face.verts)
     tgt_verts = list(tgt_face.verts)
 
@@ -192,26 +162,21 @@ def complete_face_vertex_map(src_face, tgt_face, current_vmap, axis, offset):
         if tv is not None and tv in tgt_verts:
             anchors.append((i, tgt_verts.index(tv)))
 
-    # Need at least one anchor. Usually there are two: the propagated edge.
     if not anchors:
         return None
 
     candidates = []
 
-    # Try every anchor as alignment seed, both windings.
     for src_i, tgt_i in anchors:
         src_rot = rotate_list_to_start(src_verts, src_i)
 
         tgt_forward = rotate_list_to_start(tgt_verts, tgt_i)
-        map_forward = {src_rot[k]: tgt_forward[k] for k in range(n)}
-        candidates.append(map_forward)
+        candidates.append({src_rot[k]: tgt_forward[k] for k in range(n)})
 
-        # Reverse winding but keep anchored target vertex first.
         tgt_rev_raw = list(reversed(tgt_verts))
         tgt_rev_i = tgt_rev_raw.index(tgt_verts[tgt_i])
         tgt_reverse = rotate_list_to_start(tgt_rev_raw, tgt_rev_i)
-        map_reverse = {src_rot[k]: tgt_reverse[k] for k in range(n)}
-        candidates.append(map_reverse)
+        candidates.append({src_rot[k]: tgt_reverse[k] for k in range(n)})
 
     valid = []
     for cand in candidates:
@@ -231,15 +196,10 @@ def complete_face_vertex_map(src_face, tgt_face, current_vmap, axis, offset):
 
 
 def seed_face_pair_from_seam_edge(seam_edge, axis, offset):
-    """
-    The selected seam edge should have one adjacent face on each side.
-    Those two faces are the initial source/target face pair.
-    """
     faces = list(seam_edge.link_faces)
     if len(faces) < 2:
         return None, None
 
-    # Pick the two faces with the most opposite side scores.
     best = None
     best_score = None
     for i in range(len(faces)):
@@ -261,19 +221,6 @@ def seed_face_pair_from_seam_edge(seam_edge, axis, offset):
 
 
 def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
-    """
-    Build POS->NEG vertex correspondence by propagating paired faces.
-
-    This is the Maya-like part:
-    - start from the two faces adjacent to the selected seam edge
-    - map seam verts to themselves
-    - map remaining first-face verts by local reflected position
-    - walk across corresponding edges on both sides
-    - each new face pair completes only from its already-known shared edge
-
-    No global nearest-vertex matching is used.
-    """
-
     pos_seed, neg_seed = seed_face_pair_from_seam_edge(seam_edge, axis, offset)
     if pos_seed is None or neg_seed is None:
         return {}, {}, 0
@@ -284,7 +231,6 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
     used_neg_faces = set()
     queue = deque()
 
-    # Seam vertices map to themselves for the initial edge anchors.
     for v in seam_edge.verts:
         pos_to_neg[v] = v
         neg_to_pos[v] = v
@@ -307,7 +253,6 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
         pos_face, neg_face = queue.popleft()
         processed += 1
 
-        # Ensure this face pair has complete local vertex correspondence.
         local_map = complete_face_vertex_map(pos_face, neg_face, pos_to_neg, axis, offset)
         if local_map is None:
             continue
@@ -318,7 +263,6 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
             if nv not in neg_to_pos:
                 neg_to_pos[nv] = pv
 
-        # Propagate across every non-seam edge of the positive face.
         for pe in pos_face.edges:
             pa, pb = pe.verts
 
@@ -336,18 +280,13 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
 
             if next_pos_face is None or next_neg_face is None:
                 continue
-
             if next_pos_face in paired_faces:
                 continue
             if next_neg_face in used_neg_faces:
                 continue
 
-            # Do not swap faces here. If topology propagation produces faces on
-            # unexpected sides, skip them instead of guessing. Guessing is what
-            # creates stray mismatches.
             if face_side_score(next_pos_face, axis, offset) < face_side_score(next_neg_face, axis, offset):
                 continue
-
             if len(next_pos_face.verts) != len(next_neg_face.verts):
                 continue
 
@@ -355,7 +294,6 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
             if candidate_map is None:
                 continue
 
-            # Conflict check. Never overwrite an existing pair with a different one.
             conflict = False
             for pv, nv in candidate_map.items():
                 if pv in pos_to_neg and pos_to_neg[pv] != nv:
@@ -377,6 +315,44 @@ def build_topology_correspondence(seam_edge, axis, offset, max_faces=200000):
             queue.append((next_pos_face, next_neg_face))
 
     return pos_to_neg, neg_to_pos, processed
+
+
+# ------------------------------------------------------------
+# Fallback matching for asymmetrical topology
+# ------------------------------------------------------------
+
+
+def build_fallback_kdtree(source_verts, axis, offset, min_side_distance):
+    valid = []
+    for v in source_verts:
+        if abs(signed_distance_to_plane(v.co, axis, offset)) >= min_side_distance:
+            valid.append(v)
+
+    kd = KDTree(len(valid))
+    for i, v in enumerate(valid):
+        kd.insert(v.co.copy(), i)
+    kd.balance()
+    return kd, valid
+
+
+def nearest_reflected_fallback(target_v, source_kd, source_verts, original_positions, axis, offset, count, max_dist):
+    if not source_verts:
+        return None, None
+
+    wanted = reflect_across_axis_plane(original_positions[target_v], axis, offset)
+    n = min(max(1, count), len(source_verts))
+
+    best = None
+    best_dist = None
+
+    for co, index, dist in source_kd.find_n(wanted, n):
+        if max_dist > 0.0 and dist > max_dist:
+            continue
+        if best is None or dist < best_dist:
+            best = source_verts[index]
+            best_dist = dist
+
+    return best, best_dist
 
 
 # ------------------------------------------------------------
@@ -461,6 +437,19 @@ class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
         default="AUTO",
     )
 
+    asymmetry_fallback: EnumProperty(
+        name="Asymmetrical Topology Fallback",
+        description="What to do when no topology pair is found for a selected vertex",
+        items=(
+            ("OFF", "Off", "Skip vertices without a topology pair"),
+            ("NEIGHBOR_AVERAGE", "Neighbor Average", "Use already solved neighboring vertices to place unmatched extra-edge vertices"),
+            ("NEAREST", "Nearest Reflected", "Use nearest opposite-side vertex after reflection"),
+            ("AVERAGED", "Averaged Nearest", "Average several nearest opposite-side reflected candidates"),
+            ("NEIGHBOR_THEN_AVERAGED", "Neighbor, Then Averaged", "Try neighbor average first, then averaged nearest if needed"),
+        ),
+        default="NEIGHBOR_THEN_AVERAGED",
+    )
+
     center_tolerance: FloatProperty(
         name="Center Tolerance",
         description="Selected vertices this close to the stored plane can be treated as center vertices",
@@ -481,6 +470,65 @@ class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
         default=200000,
         min=100,
         max=1000000,
+    )
+
+    fallback_candidates: IntProperty(
+        name="Fallback Candidates",
+        description="How many nearest opposite-side vertices to consider for asymmetrical fallback",
+        default=4,
+        min=1,
+        max=32,
+    )
+
+    fallback_max_distance: FloatProperty(
+        name="Fallback Max Distance",
+        description="Reject fallback matches farther than this after reflection. 0 disables the limit.",
+        default=0.0,
+        min=0.0,
+        precision=5,
+    )
+
+    fallback_ignore_center: FloatProperty(
+        name="Fallback Ignore Center",
+        description="Opposite-side fallback source vertices closer than this to the center plane are ignored",
+        default=0.001,
+        min=0.0,
+        precision=5,
+    )
+
+    fallback_blend: FloatProperty(
+        name="Fallback Blend",
+        description="Blend fallback result with current vertex position. 1.0 fully applies fallback.",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        precision=3,
+    )
+
+    neighbor_average_iterations: IntProperty(
+        name="Neighbor Avg Iterations",
+        description="Extra passes for filling unmatched selected verts from solved neighboring verts",
+        default=12,
+        min=1,
+        max=64,
+    )
+
+    neighbor_search_depth: IntProperty(
+        name="Neighbor Search Depth",
+        description="How many edge rings outward to search for solved verts when filling unmatched extra verts",
+        default=8,
+        min=1,
+        max=32,
+    )
+
+    neighbor_offset_mode: EnumProperty(
+        name="Neighbor Placement",
+        description="How unmatched extra-edge vertices are placed from solved neighbors",
+        items=(
+            ("PURE_AVERAGE", "Pure Average", "Snap to the average of solved neighbor positions"),
+            ("PRESERVE_OFFSET", "Preserve Offset", "Average solved neighbor positions while preserving each original neighbor-to-vertex offset"),
+        ),
+        default="PRESERVE_OFFSET",
     )
 
     @classmethod
@@ -525,18 +573,28 @@ class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
             return {"CANCELLED"}
 
         moved = 0
+        fallback_moved = 0
         skipped = 0
         snapped = 0
 
-        # Copy from original coordinates, not progressively modified ones.
         original_positions = {v: v.co.copy() for v in bm.verts}
+        solved_positions = {}
+        unresolved = []
+
+        pos_verts = [v for v in bm.verts if classify_vertex(v, axis, offset, self.center_tolerance) == "POS"]
+        neg_verts = [v for v in bm.verts if classify_vertex(v, axis, offset, self.center_tolerance) == "NEG"]
+
+        pos_kd = pos_list = neg_kd = neg_list = None
+        if self.asymmetry_fallback in {"NEAREST", "AVERAGED", "NEIGHBOR_THEN_AVERAGED"}:
+            pos_kd, pos_list = build_fallback_kdtree(pos_verts, axis, offset, self.fallback_ignore_center)
+            neg_kd, neg_list = build_fallback_kdtree(neg_verts, axis, offset, self.fallback_ignore_center)
 
         for v in selected:
             side = classify_vertex(v, axis, offset, self.center_tolerance)
 
             if side == "CENTER":
                 if self.snap_selected_center:
-                    v.co = set_axis_value(v.co, axis, offset)
+                    solved_positions[v] = set_axis_value(original_positions[v], axis, offset)
                     snapped += 1
                 continue
 
@@ -547,20 +605,150 @@ class MESH_OT_symmetrize_selected_from_stored_seam(bpy.types.Operator):
                 skipped += 1
                 continue
 
-            if side == "NEG":
-                src = neg_to_pos.get(v)
+            src = neg_to_pos.get(v) if side == "NEG" else pos_to_neg.get(v)
+
+            if src is not None and src != v:
+                solved_positions[v] = reflect_across_axis_plane(original_positions[src], axis, offset)
+                moved += 1
             else:
-                src = pos_to_neg.get(v)
+                unresolved.append((v, side))
 
-            if src is None or src == v:
-                skipped += 1
-                continue
+        def neighbor_average_target(v):
+            """
+            Fill an unmatched/asymmetrical vertex using the displacement field
+            from nearby already-solved vertices.
 
-            v.co = reflect_across_axis_plane(original_positions[src], axis, offset)
-            moved += 1
+            This is better than averaging positions directly:
+                delta = solved_neighbor_position - original_neighbor_position
+                target = original_vertex_position + average(delta)
+
+            That means extra edges/loops inherit the same local transform instead
+            of collapsing onto a neighbor. It also searches multiple edge rings,
+            so small dangling asymmetric islands do not get left behind.
+            """
+            visited = {v}
+            frontier = [v]
+            found = []
+
+            for depth in range(1, self.neighbor_search_depth + 1):
+                next_frontier = []
+
+                for cur in frontier:
+                    for e in cur.link_edges:
+                        n = e.other_vert(cur)
+                        if n in visited:
+                            continue
+                        visited.add(n)
+                        next_frontier.append(n)
+
+                        if n in solved_positions:
+                            found.append((n, depth))
+
+                if found:
+                    break
+                frontier = next_frontier
+
+            if not found:
+                return None
+
+            total = Vector((0.0, 0.0, 0.0))
+            total_w = 0.0
+
+            for n, depth in found:
+                if self.neighbor_offset_mode == "PURE_AVERAGE":
+                    candidate = solved_positions[n]
+                else:
+                    delta = solved_positions[n] - original_positions[n]
+                    candidate = original_positions[v] + delta
+
+                edge_dist = (original_positions[v] - original_positions[n]).length
+                w = 1.0 / max(edge_dist * depth, 0.000001)
+                total += candidate * w
+                total_w += w
+
+            if total_w <= 0.0:
+                return None
+            return total / total_w
+
+        still_unresolved = unresolved
+
+        if self.asymmetry_fallback in {"NEIGHBOR_AVERAGE", "NEIGHBOR_THEN_AVERAGED"}:
+            for _ in range(self.neighbor_average_iterations):
+                if not still_unresolved:
+                    break
+
+                next_unresolved = []
+                changed = False
+
+                for v, side in still_unresolved:
+                    target = neighbor_average_target(v)
+                    if target is None:
+                        next_unresolved.append((v, side))
+                        continue
+
+                    solved_positions[v] = original_positions[v].lerp(target, self.fallback_blend)
+                    fallback_moved += 1
+                    changed = True
+
+                still_unresolved = next_unresolved
+                if not changed:
+                    break
+
+        if self.asymmetry_fallback in {"NEAREST", "AVERAGED", "NEIGHBOR_THEN_AVERAGED"}:
+            for v, side in still_unresolved:
+                source_kd, source_list = (pos_kd, pos_list) if side == "NEG" else (neg_kd, neg_list)
+
+                if not source_list:
+                    skipped += 1
+                    continue
+
+                if self.asymmetry_fallback == "NEAREST":
+                    fb_src, _ = nearest_reflected_fallback(
+                        v,
+                        source_kd,
+                        source_list,
+                        original_positions,
+                        axis,
+                        offset,
+                        self.fallback_candidates,
+                        self.fallback_max_distance,
+                    )
+                    if fb_src is None:
+                        skipped += 1
+                        continue
+                    target = reflect_across_axis_plane(original_positions[fb_src], axis, offset)
+
+                else:
+                    wanted = reflect_across_axis_plane(original_positions[v], axis, offset)
+                    n = min(max(1, self.fallback_candidates), len(source_list))
+                    total = Vector((0.0, 0.0, 0.0))
+                    total_w = 0.0
+
+                    for co, index, dist in source_kd.find_n(wanted, n):
+                        if self.fallback_max_distance > 0.0 and dist > self.fallback_max_distance:
+                            continue
+                        src_v = source_list[index]
+                        w = 1.0 / max(dist, 0.000001)
+                        total += reflect_across_axis_plane(original_positions[src_v], axis, offset) * w
+                        total_w += w
+
+                    if total_w <= 0.0:
+                        skipped += 1
+                        continue
+
+                    target = total / total_w
+
+                solved_positions[v] = original_positions[v].lerp(target, self.fallback_blend)
+                fallback_moved += 1
+
+        else:
+            skipped += len(still_unresolved)
+
+        for v, target in solved_positions.items():
+            v.co = target
 
         bmesh.update_edit_mesh(obj.data)
-        self.report({"INFO"}, f"Moved {moved}; skipped {skipped}; snapped {snapped}; propagated faces {face_count}")
+        self.report({"INFO"}, f"Moved {moved}; fallback {fallback_moved}; skipped {skipped}; snapped {snapped}; propagated faces {face_count}")
         return {"FINISHED"}
 
 
@@ -603,10 +791,9 @@ class VIEW3D_PT_symmetrize_from_stored_seam_clean(bpy.types.Panel):
         box.operator("mesh.symmetrize_selected_from_stored_seam", text="Symmetrize Selected", icon="MOD_MIRROR")
 
         col = layout.column(align=True)
-        col.label(text="Maya-style topology mode:")
-        col.label(text="Pairs are propagated face-to-face")
-        col.label(text="from the stored seam edge.")
-        col.label(text="No global nearest matching.")
+        col.label(text="Topology first, fallback optional:")
+        col.label(text="Use Neighbor Average for")
+        col.label(text="extra edges on one side.")
 
 
 classes = (
