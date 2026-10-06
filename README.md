@@ -23,3 +23,8 @@ Morph brush -
 
 <img width="905" height="811" alt="morphbrush" src="https://github.com/user-attachments/assets/32f8842d-f5cf-4c0e-8419-7894590d6b93" />
 
+Smart image trace = 
+
+<img width="1496" height="1042" alt="Screenshot 2026-10-06 213928" src="https://github.com/user-attachments/assets/7ff77a80-3fd0-4f1a-8c67-673c4482e20c" />
+
+
