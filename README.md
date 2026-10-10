@@ -27,4 +27,9 @@ Smart image trace =
 
 <img width="1496" height="1042" alt="Screenshot 2026-10-06 213928" src="https://github.com/user-attachments/assets/7ff77a80-3fd0-4f1a-8c67-673c4482e20c" />
 
+Ring measure tool
+
+<img width="1672" height="941" alt="Blender Jewelry Measurement Add-On" src="https://github.com/user-attachments/assets/03a31a29-fa0d-4392-9564-01e2d726b969" />
+
+
 
